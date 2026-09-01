@@ -1,4 +1,4 @@
-name: RDP with persistence
+name: RDP with persistence and S3 backup
 
 on:
   workflow_dispatch:
@@ -22,10 +22,6 @@ jobs:
       RDP_PERSIST_REL: ${{ github.event.inputs["persist-path"] || 'Persist' }}
       PERSIST_INTERVAL_MIN: ${{ github.event.inputs["persist-interval-minutes"] || '10' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-      # Optional S3 config (set in repository secrets to enable periodic sync)
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
 
     steps:
@@ -35,6 +31,227 @@ jobs:
           try {
             Write-Host "Enabling Remote Desktop..."
             Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+
+            # Keep Network Level Authentication (NLA) enabled (more secure)
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
+
+            # Use SecurityLayer 1 (Negotiation) to prefer secure connections
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1 -Force
+
+            # Reset any old firewall rule
+            netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+
+            # Allow inbound RDP only from the common Tailscale address space (100.64.0.0/10).
+            netsh advfirewall firewall add rule name="RDP-Tailscale" `
+                dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 profile=any
+
+            Restart-Service -Name TermService -Force
+            Write-Host "RDP configured."
+          } catch {
+            Write-Error "Failed to configure RDP: $_"
+            exit 1
+          }
+
+      - name: Create RDP User with secure password (non-admin)
+        shell: powershell
+        run: |
+          try {
+            $username = $env:RDP_USERNAME
+            if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Write-Host "User $username already exists — skipping creation."
+            } else {
+              # Generate a strong password
+              Add-Type -AssemblyName System.Security
+              $upper = 65..90 | ForEach-Object {[char]$_}
+              $lower = 97..122 | ForEach-Object {[char]$_}
+              $nums  = 48..57 | ForEach-Object {[char]$_}
+              $spec  = (33..47 + 58..64 + 91..96 + 123..126) | ForEach-Object {[char]$_}
+              $pw = (@(
+                $upper | Get-Random -Count 4;
+                $lower | Get-Random -Count 4;
+                $nums  | Get-Random -Count 4;
+                $spec  | Get-Random -Count 4
+              ) | ForEach-Object {$_}) -join ''
+              $pw = ($pw.ToCharArray() | Sort-Object {Get-Random}) -join ''
+
+              $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+              New-LocalUser -Name $username -Password $secure -AccountNeverExpires -Description "Temporary RDP account created by workflow"
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+
+              # Create a persist folder inside the user's profile for the user to drop files for persistence.
+              $profile = "C:\Users\$username"
+              $persist = Join-Path $profile $env:RDP_PERSIST_REL
+              New-Item -ItemType Directory -Path $persist -Force | Out-Null
+
+              # Save creds to a file in the workspace and mask the password in runner logs
+              if ($env:GITHUB_WORKSPACE) {
+                $credFile = Join-Path $env:GITHUB_WORKSPACE 'rdp-creds.txt'
+                "Username: $username`nPassword: $pw`nPersist folder: $persist" | Out-File -FilePath $credFile -Encoding utf8
+                echo "RDP_CREDS_FILE=$credFile" >> $env:GITHUB_ENV
+              }
+
+              # Mask the password in runner logs
+              Write-Host "::add-mask::$pw"
+              Write-Host "Created user and persist folder: $persist"
+            }
+
+            if (-not (Get-LocalUser -Name $username)) {
+              Write-Error "User creation failed"
+              exit 1
+            }
+          } catch {
+            Write-Error "Error creating user: $_"
+            exit 1
+          }
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $stableVersion = (Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt') -as [string]
+          if (-not $stableVersion) { $stableVersion = "1.82.0" }
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$stableVersion-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Write-Host "Downloading Tailscale from $tsUrl..."
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "Tailscale installed."
+
+      - name: Establish Tailscale Connection
+        shell: powershell
+        run: |
+          if (-not $env:TAILSCALE_AUTH_KEY) {
+            Write-Error "TAILSCALE_AUTH_KEY secret missing; cannot bring up Tailscale."
+            exit 1
+          }
+          $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          if (-not (Test-Path $exe)) { Write-Error "tailscale.exe not found at $exe"; exit 1 }
+
+          # Use a unique hostname for traceability
+          $hostname = "gh-runner-$env:GITHUB_RUN_ID"
+          & $exe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$hostname
+          $tsIP = $null
+          $tries = 0
+          while (-not $tsIP -and $tries -lt 12) {
+              $tsIP = (& $exe ip -4) -join ";"   # returns one or more addresses
+              if ($tsIP) { break }
+              Start-Sleep -Seconds 5
+              $tries++
+          }
+          if (-not $tsIP) { Write-Error "Tailscale did not get an IP"; exit 1 }
+          $tsIP = $tsIP.Split(';') | Select-Object -First 1
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $tsIP"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: arn:aws:iam::863646468767:role/GitHubActionsRdpS3Policy
+          aws-region: ap-southeast-2
+
+      - name: Optional: Install AWS CLI (for S3 sync, only if S3_BUCKET set)
+        shell: powershell
+        run: |
+          if ($env:S3_BUCKET) {
+            Write-Host "Checking aws cli..."
+            $aws = (Get-Command aws -ErrorAction SilentlyContinue)
+            if (-not $aws) {
+              Write-Host "Installing AWS CLI v2..."
+              $msi = "$env:TEMP\awscliv2.msi"
+              Invoke-WebRequest "https://awscli.amazonaws.com/AWSCLIV2.msi" -OutFile $msi -UseBasicParsing
+              Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/qn","/norestart" -Wait
+              Remove-Item $msi -Force
+            }
+          } else {
+            Write-Host "S3_BUCKET not set — skipping AWS CLI install."
+          }
+
+      - name: Start periodic S3 sync (background) (optional)
+        shell: powershell
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          $interval = [int]$env:PERSIST_INTERVAL_MIN
+          if ($env:S3_BUCKET -and $interval -gt 0) {
+            Write-Host "Starting background job to sync $persistDir -> s3://$env:S3_BUCKET/rdp-backups/$env:GITHUB_RUN_ID every $interval minute(s)."
+            $script = {
+              param($persistDir, $bucket, $runId, $interval)
+              while ($true) {
+                try {
+                  if (Test-Path $persistDir) {
+                    aws s3 sync --only-show-errors $persistDir "s3://$bucket/rdp-backups/$runId/" --delete --sse AES256
+                    Write-Host "$(Get-Date -Format o) - Synced $persistDir to s3://$bucket/rdp-backups/$runId/"
+                  } else {
+                    Write-Host "$(Get-Date -Format o) - Persist path $persistDir not present yet."
+                  }
+                } catch {
+                  Write-Host "$(Get-Date -Format o) - S3 sync failed: $_"
+                }
+                Start-Sleep -Seconds ($interval * 60)
+              }
+            }
+            # Start in background
+            Start-Job -ScriptBlock $script -ArgumentList $persistDir, $env:S3_BUCKET, $env:GITHUB_RUN_ID, $interval | Out-Null
+            Write-Host "Background sync job started."
+          } else {
+            Write-Host "No S3 sync configured or interval is 0. Skipping background sync."
+          }
+
+      - name: Verify RDP Accessibility
+        shell: powershell
+        run: |
+          $ip = $env:TAILSCALE_IP
+          Write-Host "Checking connectivity to $ip:3389 ..."
+          $test = Test-NetConnection -ComputerName $ip -Port 3389 -InformationLevel Detailed
+          if (-not $test.TcpTestSucceeded) {
+            Write-Error "TCP connection to $ip:3389 failed. Ensure Tailscale ACLs allow your client IP and RDP is listening."
+            exit 1
+          }
+          Write-Host "RDP reachable via Tailscale."
+
+      - name: Maintain Connection — show credentials and wait for STOP file
+        shell: powershell
+        run: |
+          $username = $env:RDP_USERNAME
+          $persistDir = "C:\Users\$username\$env:RDP_PERSIST_REL"
+          $credFile = $env:RDP_CREDS_FILE
+          $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $username"
+          Write-Host "Credentials file (on runner workspace): $credFile"
+          Write-Host "Persist folder (drop files you want saved): $persistDir"
+          Write-Host "To stop the session and persist the data: create the file $stopFile on the runner (for example: New-Item -Path $stopFile -Value 'stop' -Force) from the remote session."
+          Write-Host "==================`n"
+
+          # Keep the step running until the sentinel STOP file appears
+          while (-not (Test-Path $stopFile)) {
+              Write-Host "[$(Get-Date -Format o)] RDP active. Waiting for STOP_WORKFLOW.txt..."
+              Start-Sleep -Seconds 30
+          }
+          Write-Host "STOP file detected — exiting keepalive so subsequent steps can persist data."
+
+      - name: Upload persisted data as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-persist-${{ github.run_id }}
+          path: C:\Users\${{ env.RDP_USERNAME }}\${{ env.RDP_PERSIST_REL }}
+
+      - name: Final S3 sync (one last time)
+        if: ${{ env.S3_BUCKET != '' }}
+        shell: powershell
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          if (Test-Path $persistDir) {
+            Write-Host "Running final S3 sync..."
+            aws s3 sync --only-show-errors $persistDir "s3://$env:S3_BUCKET/rdp-backups/$env:GITHUB_RUN_ID/" --delete --sse AES256
+          } else {
+            Write-Host "Persist folder not present; nothing to sync."
+          }
+
+      - name: Finalize
+        shell: powershell
+        run: |
+          Write-Host "Persisted data uploaded. Workflow will now finish."            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
 
             # Keep Network Level Authentication (NLA) enabled (more secure)
             Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
