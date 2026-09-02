@@ -44,6 +44,7 @@ jobs:
           } else {
               New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+              Add-LocalGroupMember -Group "Administrators" -Member $username
           }
 
           $profile = "C:\Users\$username"
