@@ -10,8 +10,8 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: [self-hosted, windows, gpu]
-    timeout-minutes: 1440
+    runs-on: windows-latest          # ← Changed from self-hosted
+    timeout-minutes: 360             # GitHub-hosted max is 6 hours
 
     env:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
@@ -55,7 +55,7 @@ jobs:
       - name: Install Tailscale
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$(Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt')-amd64.msi"
+          \( tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup- \)(Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt')-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Write-Host "Downloading Tailscale..."
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
