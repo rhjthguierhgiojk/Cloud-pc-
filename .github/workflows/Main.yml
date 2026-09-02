@@ -52,14 +52,13 @@ jobs:
 
           echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
 
-            - name: Install Tailscale via winget
-               shell: powershell
-               run: |
-               Write-Host "Installing Tailscale via winget..."
-               winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
-               Write-Host "Tailscale installed via winget."
+      - name: Install Tailscale via winget
+        shell: powershell
+        run: |
+          Write-Host "Installing Tailscale via winget..."
+          winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
+          Write-Host "Tailscale installed via winget."
 
-               
       - name: Establish Tailscale Connection
         shell: powershell
         run: |
@@ -67,11 +66,25 @@ jobs:
             Write-Error "TAILSCALE_AUTH_KEY secret missing"
             exit 1
           }
+
+          # Wait a bit for Tailscale to be ready after installation
+          Start-Sleep -Seconds 5
+
           $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
-          if (-not (Test-Path $exe)) { Write-Error "tailscale.exe not found"; exit 1 }
+          if (-not (Test-Path $exe)) {
+            # Sometimes winget installs it in a different location
+            $exe = "C:\Program Files\Tailscale\tailscale.exe"
+          }
+
+          if (-not (Test-Path $exe)) {
+            Write-Error "tailscale.exe not found"
+            exit 1
+          }
+
           $hostname = "gh-runner-$env:GITHUB_RUN_ID"
           & $exe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$hostname
           Start-Sleep -Seconds 10
+
           $tsIP = & $exe ip -4 | Select-Object -First 1
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
