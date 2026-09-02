@@ -16,6 +16,7 @@ jobs:
     env:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -68,12 +69,10 @@ jobs:
             exit 1
           }
 
-          # Wait a bit for Tailscale to be ready after installation
           Start-Sleep -Seconds 5
 
           $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
           if (-not (Test-Path $exe)) {
-            # Sometimes winget installs it in a different location
             $exe = "C:\Program Files\Tailscale\tailscale.exe"
           }
 
@@ -120,7 +119,16 @@ jobs:
               Start-Sleep -Seconds 30
           }
 
-      - name: Upload persisted data
+      - name: Upload to Dropbox
+        shell: powershell
+        run: |
+          Write-Host "Installing dropbox package..."
+          pip install dropbox
+
+          Write-Host "Uploading persisted data to Dropbox..."
+          python upload_dropbox.py
+
+      - name: Upload persisted data as artifact
         uses: actions/upload-artifact@v4
         with:
           name: rdp-persist-${{ github.run_id }}
