@@ -52,17 +52,14 @@ jobs:
 
           echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale
-        shell: powershell
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.102.3-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Write-Host "Downloading Tailscale..."
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-          Write-Host "Tailscale installed."
+            - name: Install Tailscale via winget
+               shell: powershell
+               run: |
+               Write-Host "Installing Tailscale via winget..."
+               winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
+               Write-Host "Tailscale installed via winget."
 
+               
       - name: Establish Tailscale Connection
         shell: powershell
         run: |
