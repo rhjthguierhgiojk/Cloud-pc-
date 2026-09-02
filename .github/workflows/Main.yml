@@ -11,10 +11,14 @@ on:
         description: "How often to sync to S3 (if enabled). Set 0 to disable periodic S3 sync."
         required: false
         default: 10
+      enable-dropbox:
+        description: "Enable periodic Dropbox sync (true/false)."
+        required: false
+        default: 'true'
 
 jobs:
   secure-rdp:
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows, gpu]
     timeout-minutes: 1440
 
     env:
@@ -195,6 +199,55 @@ jobs:
             Write-Host "No S3 sync configured or interval is 0. Skipping background sync."
           }
 
+      - name: Setup Python & Dropbox SDK (for periodic Dropbox backup)
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dropbox SDK
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dropbox
+
+      - name: Start periodic Dropbox sync (background) (optional)
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
+        shell: powershell
+        env:
+          DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+          RDP_USERNAME: ${{ env.RDP_USERNAME }}
+          RDP_PERSIST_REL: ${{ env.RDP_PERSIST_REL }}
+          DROPBOX_INTERVAL_MIN: ${{ github.event.inputs["persist-interval-minutes"] || '10' }}
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          $interval = [int]$env:DROPBOX_INTERVAL_MIN
+          if ($env:DROPBOX_TOKEN -and $interval -gt 0) {
+            Write-Host "Starting background job to sync $persistDir -> Dropbox every $interval minute(s)."
+            $script = {
+              param($persistDir, $interval)
+              while ($true) {
+                try {
+                  if (Test-Path $persistDir) {
+                    # uploader should accept --path; implement idempotency/retries in the script
+                    python .github/scripts/upload_dropbox.py --path "$persistDir" --quiet || Write-Host "Dropbox uploader returned non-zero exit code."
+                    Write-Host "$(Get-Date -Format o) - Dropbox sync attempt finished."
+                  } else {
+                    Write-Host "$(Get-Date -Format o) - Persist path $persistDir not present yet."
+                  }
+                } catch {
+                  Write-Host "$(Get-Date -Format o) - Dropbox sync error: $_"
+                }
+                Start-Sleep -Seconds ($interval * 60)
+              }
+            }
+            Start-Job -Name DropboxSync -ScriptBlock $script -ArgumentList $persistDir, $interval | Out-Null
+            Write-Host "Background Dropbox sync job started (job name: DropboxSync)."
+          } else {
+            Write-Host "DROPBOX_TOKEN not set or interval <= 0 — skipping Dropbox background sync."
+          }
+
       - name: Verify RDP Accessibility
         shell: powershell
         run: |
@@ -235,33 +288,6 @@ jobs:
           name: rdp-persist-${{ github.run_id }}
           path: C:\Users\${{ env.RDP_USERNAME }}\${{ env.RDP_PERSIST_REL }}
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.USERPROFILE }}\.cache\pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install Dropbox dependency and run uploader
-        shell: powershell
-        env:
-          DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
-          RDP_USERNAME: ${{ env.RDP_USERNAME }}
-          RDP_PERSIST_REL: ${{ env.RDP_PERSIST_REL }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install dropbox
-          Write-Host "Running Dropbox uploader script..."
-          python .github/scripts/upload_dropbox.py
-
       - name: Optional: Final S3 sync (one last time)
         if: ${{ env.S3_BUCKET != '' }}
         shell: powershell
@@ -274,60 +300,35 @@ jobs:
             Write-Host "Persist folder not present; nothing to sync."
           }
 
-      - name: Finalize
-        shell: powershell
-        run: |
-          Write-Host "Persisted data uploaded. Workflow will now finish."          $credFile = $env:RDP_CREDS_FILE
-          $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $username"
-          Write-Host "Credentials file (on runner workspace): $credFile"
-          Write-Host "Persist folder (drop files you want saved): $persistDir"
-          Write-Host "To stop the session and persist the data: create the file $stopFile on the runner (for example: New-Item -Path $stopFile -Value 'stop' -Force) from the remote session."
-          Write-Host "==================`n"
-
-          # Keep the step running until the sentinel STOP file appears
-          while (-not (Test-Path $stopFile)) {
-              Write-Host "[$(Get-Date -Format o)] RDP active. Waiting for STOP_WORKFLOW.txt..."
-              Start-Sleep -Seconds 30
-          }
-          Write-Host "STOP file detected — exiting keepalive so subsequent steps can persist data."
-
-      - name: Upload persisted data as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdp-persist-${{ github.run_id }}
-          path: C:\Users\${{ env.RDP_USERNAME }}\${{ env.RDP_PERSIST_REL }}
-
-      - name: Upload persisted folder to Dropbox (Python)
+      - name: Stop periodic Dropbox sync and run final upload
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
         shell: powershell
         env:
           DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
           RDP_USERNAME: ${{ env.RDP_USERNAME }}
           RDP_PERSIST_REL: ${{ env.RDP_PERSIST_REL }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-        run: |
-          # Install Python and dependencies then run the uploader script
-          Write-Host "Setting up Python..."
-          python -V || (Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe" -OutFile "$env:TEMP\python-installer.exe" -UseBasicParsing; Start-Process -FilePath "$env:TEMP\python-installer.exe" -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait)
-          python -m pip install --upgrade pip
-          pip install dropbox
-
-          Write-Host "Running Dropbox uploader script..."
-          # The script is expected at .github/scripts/upload_dropbox.py in the repo
-          python .github/scripts/upload_dropbox.py
-
-      - name: Optional: Final S3 sync (one last time)
-        if: ${{ env.S3_BUCKET != '' }}
-        shell: powershell
         run: |
           $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
-          if (Test-Path $persistDir) {
-            Write-Host "Running final S3 sync..."
-            aws s3 sync --only-show-errors $persistDir "s3://$env:S3_BUCKET/rdp-backups/$env:GITHUB_RUN_ID/" --delete
+          try {
+            $job = Get-Job -Name DropboxSync -ErrorAction SilentlyContinue
+            if ($job) {
+              Write-Host "Stopping Dropbox background job..."
+              Stop-Job -Name DropboxSync -Force -ErrorAction SilentlyContinue
+              Receive-Job -Name DropboxSync -ErrorAction SilentlyContinue | Out-Null
+              Remove-Job -Name DropboxSync -Force -ErrorAction SilentlyContinue
+            } else {
+              Write-Host "No DropboxSync job found."
+            }
+          } catch {
+            Write-Host "Error stopping Dropbox job: $_"
+          }
+
+          # Final Dropbox upload
+          if ($env:DROPBOX_TOKEN) {
+            Write-Host "Running final Dropbox upload..."
+            python .github/scripts/upload_dropbox.py --path "$persistDir"
           } else {
-            Write-Host "Persist folder not present; nothing to sync."
+            Write-Host "DROPBOX_TOKEN missing; skipping final Dropbox upload."
           }
 
       - name: Finalize
