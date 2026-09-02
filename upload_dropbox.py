@@ -10,7 +10,6 @@ Reads env:
 import os
 import sys
 import time
-import math
 import shutil
 from pathlib import Path
 
@@ -42,7 +41,6 @@ zip_file = zip_base.with_suffix(".zip")
 if zip_file.exists():
     zip_file.unlink()
 print(f"Creating zip {zip_file} from {persist_dir} ...")
-# make_archive will append .zip automatically to base_name if format='zip'
 shutil.make_archive(str(zip_base), 'zip', root_dir=str(persist_dir))
 if not zip_file.exists():
     print("Failed to create zip", file=sys.stderr)
@@ -106,6 +104,40 @@ def do_chunked_upload(path, dest):
                     try:
                         dbx.files_upload_session_finish(chunk, cursor, commit)
                         uploaded += len(chunk)
+                        return True
+                    except Exception as exc:
+                        print(f"finish attempt {attempt} failed: {exc}")
+                        if attempt == max_retries:
+                            raise
+                        time.sleep(backoff_factor ** attempt)
+            else:
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        dbx.files_upload_session_append_v2(chunk, cursor)
+                        uploaded += len(chunk)
+                        cursor.offset = uploaded
+                        break
+                    except Exception as exc:
+                        print(f"append attempt {attempt} failed: {exc}")
+                        if attempt == max_retries:
+                            raise
+                        time.sleep(backoff_factor ** attempt)
+    return False
+
+try:
+    if file_size <= SINGLE_UPLOAD_LIMIT:
+        print("Using single upload endpoint...")
+        do_single_upload(zip_file, dropbox_path)
+    else:
+        print("Using chunked upload session...")
+        do_chunked_upload(zip_file, dropbox_path)
+    print("Upload completed:", dropbox_path)
+finally:
+    try:
+        zip_file.unlink()
+        print("Cleaned up local zip.")
+    except Exception:
+        pass                        uploaded += len(chunk)
                         return True
                     except Exception as exc:
                         print(f"finish attempt {attempt} failed: {exc}")
