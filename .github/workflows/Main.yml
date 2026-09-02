@@ -1,4 +1,4 @@
-name: RDP with persistence and Dropbox upload
+name: RDP with persistence
 
 on:
   workflow_dispatch:
@@ -10,8 +10,8 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: windows-latest          # ← Changed from self-hosted
-    timeout-minutes: 360             # GitHub-hosted max is 6 hours
+    runs-on: windows-latest
+    timeout-minutes: 360
 
     env:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
@@ -55,13 +55,13 @@ jobs:
       - name: Install Tailscale
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.102.3-amd64.msi"
+          \( tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup- \)(Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt')-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Write-Host "Downloading Tailscale..."
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
-         Write-Host "Tailscale installed."
+          Write-Host "Tailscale installed."
 
       - name: Establish Tailscale Connection
         shell: powershell
