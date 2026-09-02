@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 1440
 
     env:
-      RDP_PERSIST_REL: ${{ github.event.inputs["persist-path"] || 'Persist' }}
+      RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
     steps:
