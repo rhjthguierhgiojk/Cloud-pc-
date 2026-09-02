@@ -315,6 +315,218 @@ jobs:
       - name: Finalize
         shell: powershell
         run: |
+          Write-Host "Persisted data uploaded. Workflow will now finish."      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$(Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt')-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Write-Host "Downloading Tailscale..."
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "Tailscale installed."
+
+      - name: Establish Tailscale Connection
+        shell: powershell
+        run: |
+          if (-not $env:TAILSCALE_AUTH_KEY) {
+            Write-Error "TAILSCALE_AUTH_KEY secret missing; cannot bring up Tailscale."
+            exit 1
+          }
+          $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          if (-not (Test-Path $exe)) { Write-Error "tailscale.exe not found at $exe"; exit 1 }
+          $hostname = "gh-runner-$env:GITHUB_RUN_ID"
+          & $exe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$hostname
+          $tsIP = $null
+          $tries = 0
+          while (-not $tsIP -and $tries -lt 12) {
+              $tsIP = (& $exe ip -4) -join ";"
+              if ($tsIP) { break }
+              Start-Sleep -Seconds 5
+              $tries++
+          }
+          if (-not $tsIP) { Write-Error "Tailscale did not get an IP"; exit 1 }
+          $tsIP = $tsIP.Split(';') | Select-Object -First 1
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $tsIP"
+
+      - name: Optional: Install AWS CLI (for S3 sync, only if S3_BUCKET set)
+        shell: powershell
+        run: |
+          if ($env:S3_BUCKET) {
+            Write-Host "Checking aws cli..."
+            $aws = (Get-Command aws -ErrorAction SilentlyContinue)
+            if (-not $aws) {
+              Write-Host "Installing AWS CLI v2..."
+              $msi = "$env:TEMP\awscliv2.msi"
+              Invoke-WebRequest "https://awscli.amazonaws.com/AWSCLIV2.msi" -OutFile $msi -UseBasicParsing
+              Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart" -Wait
+              Remove-Item $msi -Force
+            }
+          } else {
+            Write-Host "S3_BUCKET not set — skipping AWS CLI install."
+          }
+
+      - name: Start periodic S3 sync (background) (optional)
+        shell: powershell
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          $interval = [int]$env:PERSIST_INTERVAL_MIN
+          if ($env:S3_BUCKET -and $interval -gt 0) {
+            Write-Host "Starting background job to sync $persistDir -> s3://$env:S3_BUCKET/rdp-backups/$env:GITHUB_RUN_ID every $interval minute(s)."
+            $script = {
+              param($persistDir, $bucket, $runId, $interval)
+              while ($true) {
+                try {
+                  if (Test-Path $persistDir) {
+                    aws s3 sync --only-show-errors $persistDir "s3://$bucket/rdp-backups/$runId/" --delete
+                    Write-Host "$(Get-Date -Format o) - Synced $persistDir to s3://$bucket/rdp-backups/$runId/"
+                  } else {
+                    Write-Host "$(Get-Date -Format o) - Persist path $persistDir not present yet."
+                  }
+                } catch {
+                  Write-Host "$(Get-Date -Format o) - S3 sync failed: $_"
+                }
+                Start-Sleep -Seconds ($interval * 60)
+              }
+            }
+            Start-Job -ScriptBlock $script -ArgumentList $persistDir, $env:S3_BUCKET, $env:GITHUB_RUN_ID, $interval | Out-Null
+            Write-Host "Background sync job started."
+          } else {
+            Write-Host "No S3 sync configured or interval is 0. Skipping background sync."
+          }
+
+      - name: Setup Python & Dropbox SDK (for periodic Dropbox backup)
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dropbox SDK
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dropbox
+
+      - name: Start periodic Dropbox sync (background) (optional)
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
+        shell: powershell
+        env:
+          DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+          RDP_USERNAME: ${{ env.RDP_USERNAME }}
+          RDP_PERSIST_REL: ${{ env.RDP_PERSIST_REL }}
+          DROPBOX_INTERVAL_MIN: ${{ github.event.inputs["persist-interval-minutes"] || '10' }}
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          $interval = [int]$env:DROPBOX_INTERVAL_MIN
+          if ($env:DROPBOX_TOKEN -and $interval -gt 0) {
+            Write-Host "Starting background job to sync $persistDir -> Dropbox every $interval minute(s)."
+            $script = {
+              param($persistDir, $interval)
+              while ($true) {
+                try {
+                  if (Test-Path $persistDir) {
+                    python .github/scripts/upload_dropbox.py --path "$persistDir" --quiet || Write-Host "Dropbox uploader returned non-zero exit code."
+                    Write-Host "$(Get-Date -Format o) - Dropbox sync attempt finished."
+                  } else {
+                    Write-Host "$(Get-Date -Format o) - Persist path $persistDir not present yet."
+                  }
+                } catch {
+                  Write-Host "$(Get-Date -Format o) - Dropbox sync error: $_"
+                }
+                Start-Sleep -Seconds ($interval * 60)
+              }
+            }
+            Start-Job -Name DropboxSync -ScriptBlock $script -ArgumentList $persistDir, $interval | Out-Null
+            Write-Host "Background Dropbox sync job started (job name: DropboxSync)."
+          } else {
+            Write-Host "DROPBOX_TOKEN not set or interval <= 0 — skipping Dropbox background sync."
+          }
+
+      - name: Verify RDP Accessibility
+        shell: powershell
+        run: |
+          $ip = $env:TAILSCALE_IP
+          Write-Host "Checking connectivity to $ip:3389 ..."
+          $test = Test-NetConnection -ComputerName $ip -Port 3389 -InformationLevel Detailed
+          if (-not $test.TcpTestSucceeded) {
+            Write-Error "TCP connection to $ip:3389 failed. Ensure Tailscale ACLs allow your client IP and RDP is listening."
+            exit 1
+          }
+          Write-Host "RDP reachable via Tailscale."
+
+      - name: Maintain Connection — show credentials and wait for STOP file
+        shell: powershell
+        run: |
+          $username = $env:RDP_USERNAME
+          $persistDir = "C:\Users\$username\$env:RDP_PERSIST_REL"
+          $credFile = $env:RDP_CREDS_FILE
+          $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $username"
+          Write-Host "Password: (from secret RDP_USERNAME_PASSWORD)"
+          Write-Host "Credentials file (on runner workspace): $credFile"
+          Write-Host "Persist folder (drop files you want saved): $persistDir"
+          Write-Host "To stop the session and persist the data: create the file $stopFile on the runner (for example: New-Item -Path $stopFile -Value 'stop' -Force) from the remote session."
+          Write-Host "==================`n"
+          while (-not (Test-Path $stopFile)) {
+              Write-Host "[$(Get-Date -Format o)] RDP active. Waiting for STOP_WORKFLOW.txt..."
+              Start-Sleep -Seconds 30
+          }
+          Write-Host "STOP file detected — exiting keepalive so subsequent steps can persist data."
+
+      - name: Upload persisted data as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-persist-${{ github.run_id }}
+          path: C:\Users\${{ env.RDP_USERNAME }}\${{ env.RDP_PERSIST_REL }}
+
+      - name: Optional: Final S3 sync (one last time)
+        if: ${{ env.S3_BUCKET != '' }}
+        shell: powershell
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          if (Test-Path $persistDir) {
+            Write-Host "Running final S3 sync..."
+            aws s3 sync --only-show-errors $persistDir "s3://$env:S3_BUCKET/rdp-backups/$env:GITHUB_RUN_ID/" --delete
+          } else {
+            Write-Host "Persist folder not present; nothing to sync."
+          }
+
+      - name: Stop periodic Dropbox sync and run final upload
+        if: ${{ github.event.inputs.enable-dropbox == 'true' && secrets.DROPBOX_TOKEN != '' }}
+        shell: powershell
+        env:
+          DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+          RDP_USERNAME: ${{ env.RDP_USERNAME }}
+          RDP_PERSIST_REL: ${{ env.RDP_PERSIST_REL }}
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          try {
+            $job = Get-Job -Name DropboxSync -ErrorAction SilentlyContinue
+            if ($job) {
+              Write-Host "Stopping Dropbox background job..."
+              Stop-Job -Name DropboxSync -Force -ErrorAction SilentlyContinue
+              Receive-Job -Name DropboxSync -ErrorAction SilentlyContinue | Out-Null
+              Remove-Job -Name DropboxSync -Force -ErrorAction SilentlyContinue
+            } else {
+              Write-Host "No DropboxSync job found."
+            }
+          } catch {
+            Write-Host "Error stopping Dropbox job: $_"
+          }
+          if ($env:DROPBOX_TOKEN) {
+            Write-Host "Running final Dropbox upload..."
+            python .github/scripts/upload_dropbox.py --path "$persistDir"
+          } else {
+            Write-Host "DROPBOX_TOKEN missing; skipping final Dropbox upload."
+          }
+
+      - name: Finalize
+        shell: powershell
+        run: |
           Write-Host "Persisted data uploaded. Workflow will now finish."      - name: Checkout repository
         uses: actions/checkout@v4
 
