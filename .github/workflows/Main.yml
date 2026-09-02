@@ -22,7 +22,6 @@ jobs:
     timeout-minutes: 1440
 
     env:
-      RDP_CREDENTIALS: ${{ secrets.RDP_USERNAME_PASSWORD }}
       RDP_PERSIST_REL: ${{ github.event.inputs["persist-path"] || 'Persist' }}
       PERSIST_INTERVAL_MIN: ${{ github.event.inputs["persist-interval-minutes"] || '10' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
@@ -54,59 +53,42 @@ jobs:
             exit 1
           }
 
-      - name: Create RDP User with secure password (non-admin)
+      - name: Create RDP User with Secure Password
         shell: powershell
         run: |
-          try {
-            $combined = $env:RDP_CREDENTIALS
-            if (-not $combined) {
-              Write-Error "RDP_USERNAME_PASSWORD secret not set"
-              exit 1
-            }
-            $parts = $combined -split ':', 2
-            if ($parts.Count -ne 2) {
-              Write-Error "RDP_USERNAME_PASSWORD must be in format 'username:password'"
-              exit 1
-            }
-            $username = $parts[0].Trim()
-            $password = $parts[1].Trim()
-            if (-not $username -or -not $password) {
-              Write-Error "Username or password is empty"
-              exit 1
-            }
-            if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-              Write-Host "User $username already exists — updating password."
-              $secure = ConvertTo-SecureString $password -AsPlainText -Force
-              Set-LocalUser -Name $username -Password $secure
-              Write-Host "Password updated for existing user."
-            } else {
-              $secure = ConvertTo-SecureString $password -AsPlainText -Force
-              New-LocalUser -Name $username -Password $secure -AccountNeverExpires -Description "Temporary RDP account created by workflow"
+          $username = "Winn_core"
+          $password = "Elol..92"   # ← change this password anytime you want
+
+          Write-Host "Creating / updating user: $username"
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Write-Host "User already exists — updating password..."
+              Set-LocalUser -Name $username -Password $securePass
+          } else {
+              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP account for Winn"
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-              $profile = "C:\Users\$username"
-              $persist = Join-Path $profile $env:RDP_PERSIST_REL
-              New-Item -ItemType Directory -Path $persist -Force | Out-Null
-              Write-Host "Created user and persist folder: $persist"
-            }
-            $credFile = Join-Path $env:GITHUB_WORKSPACE 'rdp-creds.txt'
-            "Username: $username`nPassword: (from secret RDP_USERNAME_PASSWORD)`nPersist folder: C:\Users\$username\$env:RDP_PERSIST_REL" | Out-File -FilePath $credFile -Encoding utf8
-            echo "RDP_CREDS_FILE=$credFile" >> $env:GITHUB_ENV
-            echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
-            Write-Host "::add-mask::$password"
-            Write-Host "User $username configured successfully."
-            if (-not (Get-LocalUser -Name $username)) {
-              Write-Error "User verification failed"
-              exit 1
-            }
-          } catch {
-            Write-Error "Error creating/updating user: $_"
-            exit 1
+              # Uncomment the next line if you want the user to have Administrator rights
+              # Add-LocalGroupMember -Group "Administrators" -Member $username
           }
+
+          # Create persist folder
+          $profile = "C:\Users\$username"
+          $persist = Join-Path $profile $env:RDP_PERSIST_REL
+          New-Item -ItemType Directory -Path $persist -Force | Out-Null
+
+          # Save for later steps
+          echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+          Write-Host "User $username is ready."
+          Write-Host "Password: $password"
 
       - name: Install Tailscale
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$(Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt')-amd64.msi"
+          \( tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup- \)(Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt')-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Write-Host "Downloading Tailscale..."
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
@@ -154,16 +136,18 @@ jobs:
         shell: powershell
         run: |
           $username = $env:RDP_USERNAME
+          $password = $env:RDP_PASSWORD
           $persistDir = "C:\Users\$username\$env:RDP_PERSIST_REL"
-          $credFile = $env:RDP_CREDS_FILE
           $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
+
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $username"
-          Write-Host "Password: (from secret RDP_USERNAME_PASSWORD)"
-          Write-Host "Persist folder (drop files you want saved): $persistDir"
-          Write-Host "To stop: create $stopFile from the remote session"
+          Write-Host "Address   : $env:TAILSCALE_IP"
+          Write-Host "Username  : $username"
+          Write-Host "Password  : $password"
+          Write-Host "Persist   : $persistDir"
+          Write-Host "To stop   : create $stopFile from the remote session"
           Write-Host "==================`n"
+
           while (-not (Test-Path $stopFile)) {
               Write-Host "[$(Get-Date -Format o)] RDP active. Waiting for STOP_WORKFLOW.txt..."
               Start-Sleep -Seconds 30
