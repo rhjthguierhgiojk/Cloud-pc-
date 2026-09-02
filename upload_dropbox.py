@@ -1,111 +1,151 @@
 #!/usr/bin/env python3
 """
-Zip a folder and upload to Dropbox.
-Reads env:
-  DROPBOX_TOKEN     - required: Dropbox API OAuth2 access token
-  RDP_USERNAME      - name of the RDP user (to build the persist path)
-  RDP_PERSIST_REL   - relative folder inside the RDP user's profile (e.g., Persist)
-  GITHUB_RUN_ID     - used for naming the remote file
+Uploads the persist folder created by the RDP workflow to Dropbox.
+Expected environment variables (set by the workflow):
+- DROPBOX_TOKEN
+- RDP_USERNAME (default: RDP)
+- RDP_PERSIST_REL (default: Persist)
+- GITHUB_RUN_ID (used to group uploads)
+
+This script preserves relative paths under /rdp-backups/<GITHUB_RUN_ID>/ in Dropbox.
+It performs chunked uploads for files larger than 150 MiB.
 """
+
 import os
 import sys
+import logging
 import time
-import shutil
 from pathlib import Path
 
 try:
     import dropbox
     from dropbox.files import WriteMode, UploadSessionCursor, CommitInfo
-except Exception as e:
-    print("Missing dropbox package; please pip install dropbox", file=sys.stderr)
+    from dropbox.exceptions import ApiError, AuthError
+except Exception:
+    print("The 'dropbox' package is required. Install with: pip install dropbox", file=sys.stderr)
     raise
 
-# Config
-TOKEN = os.environ.get("DROPBOX_TOKEN")
-RDP_USERNAME = os.environ.get("RDP_USERNAME", "RDP")
-RDP_PERSIST_REL = os.environ.get("RDP_PERSIST_REL", "Persist")
-RUN_ID = os.environ.get("GITHUB_RUN_ID", "local")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-if not TOKEN:
-    print("ERROR: DROPBOX_TOKEN not set", file=sys.stderr)
+DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+RDP_USERNAME = os.getenv("RDP_USERNAME", "RDP")
+RDP_PERSIST_REL = os.getenv("RDP_PERSIST_REL", "Persist")
+GITHUB_RUN_ID = os.getenv("GITHUB_RUN_ID", "local-run")
+
+if not DROPBOX_TOKEN:
+    logging.error("DROPBOX_TOKEN environment variable is not set.")
     sys.exit(1)
 
-persist_dir = Path(f"C:/Users/{RDP_USERNAME}/{RDP_PERSIST_REL}")
-if not persist_dir.exists():
-    print(f"No persist directory found at {persist_dir}; nothing to upload.")
+# Windows-style local root path created by the workflow
+local_root = Path(f"C:/Users/{RDP_USERNAME}/{RDP_PERSIST_REL}")
+if not local_root.exists():
+    logging.warning("Persist folder does not exist: %s", local_root)
+    # Nothing to upload; exit successfully so workflow can continue
     sys.exit(0)
 
-# Create ZIP
-zip_base = Path(os.environ.get("TEMP", "/tmp")) / f"rdp-persist-{RUN_ID}"
-zip_file = zip_base.with_suffix(".zip")
-if zip_file.exists():
-    zip_file.unlink()
-print(f"Creating zip {zip_file} from {persist_dir} ...")
-shutil.make_archive(str(zip_base), 'zip', root_dir=str(persist_dir))
-if not zip_file.exists():
-    print("Failed to create zip", file=sys.stderr)
+try:
+    dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+    # Test token
+    dbx.users_get_current_account()
+except AuthError:
+    logging.error("Dropbox authentication failed. Check DROPBOX_TOKEN.")
+    sys.exit(1)
+except ApiError as e:
+    logging.error("Dropbox API error (auth/test): %s", e)
+    sys.exit(1)
+except Exception as e:
+    logging.error("Failed to initialize Dropbox client: %s", e)
     sys.exit(1)
 
-file_size = zip_file.stat().st_size
-print(f"Zip size: {file_size / (1024*1024):.2f} MB")
+DROPBOX_ROOT = f"/rdp-backups/{GITHUB_RUN_ID}"
 
-dbx = dropbox.Dropbox(TOKEN)
-dropbox_path = f"/rdp-backups/{RUN_ID}.zip"
+CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2  # seconds multiplier
 
-# Upload logic with chunked session support for > 150 MB
-CHUNK_SIZE = 8 * 1024 * 1024  # 8MB chunk; adjust if needed
-SINGLE_UPLOAD_LIMIT = 150 * 1024 * 1024  # 150 MB
 
-max_retries = 5
-backoff_factor = 2
+def upload_file(local_path: Path, dest_path: str):
+    size = local_path.stat().st_size
+    dest_path = dest_path.replace("\\", "/")
+    logging.info("Uploading %s -> %s (%d bytes)", local_path, dest_path, size)
 
-def do_single_upload(path, dest):
-    with path.open("rb") as f:
-        data = f.read()
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            dbx.files_upload(data, dest, mode=WriteMode('add'), mute=False)
-            return True
-        except Exception as exc:
-            print(f"Single upload attempt {attempt} failed: {exc}")
-            if attempt == max_retries:
-                raise
-            time.sleep(backoff_factor ** attempt)
-    return False
+            with local_path.open("rb") as f:
+                if size <= 150 * 1024 * 1024:
+                    data = f.read()
+                    dbx.files_upload(data, dest_path, mode=WriteMode("overwrite"))
+                else:
+                    # Chunked upload for large files
+                    logging.info("Starting chunked upload for %s", local_path)
+                    session_start_result = dbx.files_upload_session_start(f.read(CHUNK_SIZE))
+                    cursor = UploadSessionCursor(session_id=session_start_result.session_id, offset=f.tell())
+                    commit = CommitInfo(path=dest_path, mode=WriteMode("overwrite"))
 
-def do_chunked_upload(path, dest):
-    with path.open("rb") as f:
-        session_id = None
-        cursor = None
-        uploaded = 0
-        # start
-        chunk = f.read(CHUNK_SIZE)
-        for attempt in range(1, max_retries + 1):
+                    while f.tell() < size:
+                        remaining = size - f.tell()
+                        chunk = f.read(CHUNK_SIZE)
+                        if remaining <= CHUNK_SIZE:
+                            dbx.files_upload_session_finish(chunk, cursor, commit)
+                        else:
+                            dbx.files_upload_session_append_v2(chunk, cursor)
+                            cursor.offset = f.tell()
+            # success
+            return
+        except AuthError:
+            logging.error("Dropbox authentication failed during upload of %s. Aborting.", local_path)
+            raise
+        except ApiError as e:
+            logging.warning("Upload attempt %d failed for %s: %s", attempt, local_path, e)
+            if attempt < MAX_RETRIES:
+                sleep_for = (RETRY_BACKOFF ** (attempt - 1))
+                logging.info("Retrying in %d seconds...", sleep_for)
+                time.sleep(sleep_for)
+                continue
+            else:
+                logging.error("Upload failed after %d attempts for %s", MAX_RETRIES, local_path)
+                return
+        except Exception as e:
+            logging.error("Unexpected error uploading %s: %s", local_path, e)
+            return
+
+
+def ensure_dropbox_folder(path: str):
+    try:
+        dbx.files_get_metadata(path)
+    except ApiError:
+        # If not found, create it (ignore errors from race conditions)
+        try:
+            dbx.files_create_folder_v2(path)
+            logging.info("Created Dropbox folder %s", path)
+        except ApiError:
+            pass
+
+
+def main():
+    logging.info("Starting upload from %s to %s", local_root, DROPBOX_ROOT)
+    for root, dirs, files in os.walk(local_root):
+        rel_root = Path(root).relative_to(local_root)
+        dropbox_dir = f"{DROPBOX_ROOT}/{rel_root.as_posix()}" if str(rel_root) != "." else DROPBOX_ROOT
+        # ensure folder exists (Dropbox folders are created implicitly by uploads, but we call for clarity)
+        try:
+            ensure_dropbox_folder(dropbox_dir)
+        except Exception:
+            pass
+
+        for fname in files:
+            local_path = Path(root) / fname
+            dest_path = f"{dropbox_dir}/{fname}"
             try:
-                res = dbx.files_upload_session_start(chunk)
-                session_id = res.session_id
-                uploaded = len(chunk)
-                cursor = UploadSessionCursor(session_id=session_id, offset=uploaded)
-                break
-            except Exception as exc:
-                print(f"start session attempt {attempt} failed: {exc}")
-                if attempt == max_retries:
-                    raise
-                time.sleep(backoff_factor ** attempt)
+                upload_file(local_path, dest_path)
+            except Exception as e:
+                logging.error("Failed to upload %s: %s", local_path, e)
 
-        # append
-        while uploaded < file_size:
-            to_read = min(CHUNK_SIZE, file_size - uploaded)
-            chunk = f.read(to_read)
-            if file_size - uploaded <= CHUNK_SIZE:
-                # finish
-                commit = CommitInfo(path=dest, mode=WriteMode('add'), mute=False)
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        dbx.files_upload_session_finish(chunk, cursor, commit)
-                        uploaded += len(chunk)
-                        return True
-                    except Exception as exc:
+    logging.info("Upload run complete.")
+
+
+if __name__ == "__main__":
+    main()                    except Exception as exc:
                         print(f"finish attempt {attempt} failed: {exc}")
                         if attempt == max_retries:
                             raise
