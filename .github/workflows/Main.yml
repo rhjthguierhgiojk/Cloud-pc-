@@ -55,10 +55,9 @@ jobs:
       - name: Install Tailscale
         shell: powershell
         run: |
-          $version = Invoke-RestMethod 'https://pkgs.tailscale.com/stable'
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$version-amd64.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.102.3-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          Write-Host "Downloading Tailscale version $version..."
+          Write-Host "Downloading Tailscale..."
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
