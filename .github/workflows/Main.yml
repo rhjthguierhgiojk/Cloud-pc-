@@ -39,5 +39,78 @@ jobs:
           $password = "Elol..92"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContin
-
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name $username -Password $securePass
+          } else {
+              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          }
+
+          $profile = "C:\Users\$username"
+          $persist = Join-Path $profile $env:RDP_PERSIST_REL
+          New-Item -ItemType Directory -Path $persist -Force | Out-Null
+
+          echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$(Invoke-RestMethod 'https://pkgs.tailscale.com/stable.txt')-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Write-Host "Downloading Tailscale..."
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "Tailscale installed."
+
+      - name: Establish Tailscale Connection
+        shell: powershell
+        run: |
+          if (-not $env:TAILSCALE_AUTH_KEY) {
+            Write-Error "TAILSCALE_AUTH_KEY secret missing"
+            exit 1
+          }
+          $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          if (-not (Test-Path $exe)) { Write-Error "tailscale.exe not found"; exit 1 }
+          $hostname = "gh-runner-$env:GITHUB_RUN_ID"
+          & $exe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$hostname
+          Start-Sleep -Seconds 10
+          $tsIP = & $exe ip -4 | Select-Object -First 1
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $tsIP"
+
+      - name: Verify RDP Accessibility
+        shell: powershell
+        run: |
+          $ip = $env:TAILSCALE_IP
+          Write-Host "Checking connectivity to $ip:3389..."
+          $test = Test-NetConnection -ComputerName $ip -Port 3389 -InformationLevel Detailed
+          if (-not $test.TcpTestSucceeded) {
+            Write-Error "TCP connection failed"
+            exit 1
+          }
+          Write-Host "RDP reachable via Tailscale."
+
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+          $persistDir = "C:\Users\Winn_core\$env:RDP_PERSIST_REL"
+          $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
+
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "IP       : $env:TAILSCALE_IP"
+          Write-Host "Username : Winn_core"
+          Write-Host "Password : Elol..92"
+          Write-Host "Persist  : $persistDir"
+          Write-Host "==================`n"
+
+          while (-not (Test-Path $stopFile)) {
+              Write-Host "[$(Get-Date -Format o)] RDP active..."
+              Start-Sleep -Seconds 30
+          }
+
+      - name: Upload persisted data
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-persist-${{ github.run_id }}
+          path: C:\Users\Winn_core\${{ env.RDP_PERSIST_REL }}
