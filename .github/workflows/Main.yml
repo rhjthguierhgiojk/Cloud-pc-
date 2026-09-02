@@ -30,6 +30,9 @@ jobs:
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Configure Core RDP Settings (safer defaults)
         shell: powershell
         run: |
@@ -154,7 +157,8 @@ jobs:
               Write-Host "Installing AWS CLI v2..."
               $msi = "$env:TEMP\awscliv2.msi"
               Invoke-WebRequest "https://awscli.amazonaws.com/AWSCLIV2.msi" -OutFile $msi -UseBasicParsing
-              Start-Process msiexec.exe -ArgumentList "/i","`"$msi`$"","/qn","/norestart" -Wait
+              # Fixed quoting here
+              Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart" -Wait
               Remove-Item $msi -Force
             }
           } else {
@@ -209,6 +213,71 @@ jobs:
           $username = $env:RDP_USERNAME
           $persistDir = "C:\Users\$username\$env:RDP_PERSIST_REL"
           $credFile = $env:RDP_CREDS_FILE
+          $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $username"
+          Write-Host "Credentials file (on runner workspace): $credFile"
+          Write-Host "Persist folder (drop files you want saved): $persistDir"
+          Write-Host "To stop the session and persist the data: create the file $stopFile on the runner (for example: New-Item -Path $stopFile -Value 'stop' -Force) from the remote session."
+          Write-Host "==================`n"
+
+          # Keep the step running until the sentinel STOP file appears
+          while (-not (Test-Path $stopFile)) {
+              Write-Host "[$(Get-Date -Format o)] RDP active. Waiting for STOP_WORKFLOW.txt..."
+              Start-Sleep -Seconds 30
+          }
+          Write-Host "STOP file detected — exiting keepalive so subsequent steps can persist data."
+
+      - name: Upload persisted data as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-persist-${{ github.run_id }}
+          path: C:\Users\${{ env.RDP_USERNAME }}\${{ env.RDP_PERSIST_REL }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.USERPROFILE }}\.cache\pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Dropbox dependency and run uploader
+        shell: powershell
+        env:
+          DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+          RDP_USERNAME: ${{ env.RDP_USERNAME }}
+          RDP_PERSIST_REL: ${{ env.RDP_PERSIST_REL }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dropbox
+          Write-Host "Running Dropbox uploader script..."
+          python .github/scripts/upload_dropbox.py
+
+      - name: Optional: Final S3 sync (one last time)
+        if: ${{ env.S3_BUCKET != '' }}
+        shell: powershell
+        run: |
+          $persistDir = "C:\Users\$env:RDP_USERNAME\$env:RDP_PERSIST_REL"
+          if (Test-Path $persistDir) {
+            Write-Host "Running final S3 sync..."
+            aws s3 sync --only-show-errors $persistDir "s3://$env:S3_BUCKET/rdp-backups/$env:GITHUB_RUN_ID/" --delete
+          } else {
+            Write-Host "Persist folder not present; nothing to sync."
+          }
+
+      - name: Finalize
+        shell: powershell
+        run: |
+          Write-Host "Persisted data uploaded. Workflow will now finish."          $credFile = $env:RDP_CREDS_FILE
           $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
