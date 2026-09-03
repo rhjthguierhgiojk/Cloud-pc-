@@ -17,6 +17,7 @@ jobs:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+      RDP_USERNAME: Winn_core
 
     steps:
       - name: Checkout repository
@@ -52,7 +53,13 @@ jobs:
           $persist = Join-Path $profile $env:RDP_PERSIST_REL
           New-Item -ItemType Directory -Path $persist -Force | Out-Null
 
-          echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
+      - name: Restore previous data from Dropbox
+        shell: powershell
+        env:
+          BACKUP_MODE: restore
+        run: |
+          pip install dropbox
+          python backup_restore.py
 
       - name: Install Tailscale via winget
         shell: powershell
@@ -71,14 +78,9 @@ jobs:
 
           Start-Sleep -Seconds 5
 
-          $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          $exe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
-            $exe = "C:\Program Files\Tailscale\tailscale.exe"
-          }
-
-          if (-not (Test-Path $exe)) {
-            Write-Error "tailscale.exe not found"
-            exit 1
+            $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
           }
 
           $hostname = "gh-runner-$env:GITHUB_RUN_ID"
@@ -93,7 +95,6 @@ jobs:
         shell: powershell
         run: |
           $ip = $env:TAILSCALE_IP
-          Write-Host "Checking connectivity to $ip:3389..."
           $test = Test-NetConnection -ComputerName $ip -Port 3389 -InformationLevel Detailed
           if (-not $test.TcpTestSucceeded) {
             Write-Error "TCP connection failed"
@@ -119,14 +120,15 @@ jobs:
               Start-Sleep -Seconds 30
           }
 
-      - name: Upload to Dropbox
-        shell: powershell
-        run: |
-          Write-Host "Installing dropbox package..."
-          pip install dropbox
+          Write-Host "STOP file detected. Starting backup..."
 
-          Write-Host "Uploading persisted data to Dropbox..."
-          python upload_dropbox.py
+      - name: Backup and Upload to Dropbox
+        shell: powershell
+        env:
+          BACKUP_MODE: backup
+        run: |
+          pip install dropbox
+          python backup_restore.py
 
       - name: Upload persisted data as artifact
         uses: actions/upload-artifact@v4
