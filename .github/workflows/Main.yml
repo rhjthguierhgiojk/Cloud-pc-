@@ -58,7 +58,7 @@ jobs:
         env:
           BACKUP_MODE: restore
         run: |
-          pip install dropbox
+          pip install dropbox==11.36.2
           python backup_restore.py
 
       - name: Install Tailscale via winget
