@@ -16,7 +16,7 @@ jobs:
     env:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-      DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+      RDP_USERNAME: Winn_core
 
     steps:
       - name: Checkout repository
@@ -52,7 +52,56 @@ jobs:
           $persist = Join-Path $profile $env:RDP_PERSIST_REL
           New-Item -ItemType Directory -Path $persist -Force | Out-Null
 
-          echo "RDP_USERNAME=$username" >> $env:GITHUB_ENV
+      - name: Try restore previous backup
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: RDP-BACKUP-VM-*
+          path: C:\restore-temp
+          merge-multiple: true
+
+      - name: Restore files if backup exists
+        shell: powershell
+        run: |
+          $restorePath = "C:\restore-temp"
+          if (-not (Test-Path $restorePath) -or -not (Get-ChildItem $restorePath -ErrorAction SilentlyContinue)) {
+              Write-Host "No previous backup found. Starting fresh."
+              exit 0
+          }
+
+          Write-Host "Previous backup(s) found. Looking for the newest one..."
+
+          $backups = Get-ChildItem -Path $restorePath -Directory -ErrorAction SilentlyContinue
+          if (-not $backups) {
+              $sourceRoot = $restorePath
+          } else {
+              $newest = $backups | Sort-Object Name -Descending | Select-Object -First 1
+              $sourceRoot = $newest.FullName
+              Write-Host "Using backup: $($newest.Name)"
+          }
+
+          $mapping = @{
+              "Persist"   = "C:\Users\Winn_core\Persist"
+              "Desktop"   = "C:\Users\Winn_core\Desktop"
+              "Documents" = "C:\Users\Winn_core\Documents"
+              "Downloads" = "C:\Users\Winn_core\Downloads"
+              "Pictures"  = "C:\Users\Winn_core\Pictures"
+              "Videos"    = "C:\Users\Winn_core\Videos"
+              "Music"     = "C:\Users\Winn_core\Music"
+              "D_Drive"   = "D:\"
+          }
+
+          foreach ($key in $mapping.Keys) {
+              $source = Join-Path $sourceRoot $key
+              if (Test-Path $source) {
+                  $dest = $mapping[$key]
+                  New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                  Copy-Item -Path "$source\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+                  Write-Host "Restored $key → $dest"
+              }
+          }
+
+          Write-Host "Restore completed."
 
       - name: Install Tailscale via winget
         shell: powershell
@@ -71,14 +120,9 @@ jobs:
 
           Start-Sleep -Seconds 5
 
-          $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          $exe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
-            $exe = "C:\Program Files\Tailscale\tailscale.exe"
-          }
-
-          if (-not (Test-Path $exe)) {
-            Write-Error "tailscale.exe not found"
-            exit 1
+            $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
           }
 
           $hostname = "gh-runner-$env:GITHUB_RUN_ID"
@@ -93,7 +137,6 @@ jobs:
         shell: powershell
         run: |
           $ip = $env:TAILSCALE_IP
-          Write-Host "Checking connectivity to $ip:3389..."
           $test = Test-NetConnection -ComputerName $ip -Port 3389 -InformationLevel Detailed
           if (-not $test.TcpTestSucceeded) {
             Write-Error "TCP connection failed"
@@ -101,11 +144,13 @@ jobs:
           }
           Write-Host "RDP reachable via Tailscale."
 
-      - name: Maintain Connection
+      - name: Maintain Connection + Health Check
         shell: powershell
         run: |
           $persistDir = "C:\Users\Winn_core\$env:RDP_PERSIST_REL"
           $stopFile = Join-Path $persistDir 'STOP_WORKFLOW.txt'
+          $failCount = 0
+          $maxFails = 3
 
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "IP       : $env:TAILSCALE_IP"
@@ -114,22 +159,107 @@ jobs:
           Write-Host "Persist  : $persistDir"
           Write-Host "==================`n"
 
-          while (-not (Test-Path $stopFile)) {
-              Write-Host "[$(Get-Date -Format o)] RDP active..."
-              Start-Sleep -Seconds 30
+          while ($true) {
+              if (Test-Path $stopFile) {
+                  Write-Host "STOP_WORKFLOW.txt detected. Stopping..."
+                  break
+              }
+
+              $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+
+              if ($test.TcpTestSucceeded) {
+                  $failCount = 0
+                  Write-Host "[$(Get-Date -Format o)] RDP is healthy..."
+              }
+              else {
+                  $failCount++
+                  Write-Host "[$(Get-Date -Format o)] RDP unreachable (fail $failCount/$maxFails)"
+
+                  Write-Host "Attempting recovery..."
+                  try {
+                      $apps = @("chrome", "msedge", "firefox", "code", "devenv", "GameBar", "SearchApp", "OneDrive")
+                      foreach ($app in $apps) {
+                          Get-Process -Name $app -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                      }
+                      Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
+                      Start-Sleep -Seconds 5
+                  }
+                  catch {
+                      Write-Host "Recovery attempt failed: $_"
+                  }
+
+                  if ($failCount -ge $maxFails) {
+                      Write-Host "RDP still dead after recovery attempts. Auto stopping..."
+                      "Cloud PC became unreachable - auto stopped" | Out-File (Join-Path $persistDir "AUTO_STOPPED.txt")
+                      break
+                  }
+              }
+
+              Start-Sleep -Seconds 120
           }
 
-      - name: Upload to Dropbox
+      - name: Prepare backup folders
+        if: always()
         shell: powershell
         run: |
-          Write-Host "Installing dropbox package..."
-          pip install dropbox
+          $backupRoot = "C:\backup-temp"
+          New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 
-          Write-Host "Uploading persisted data to Dropbox..."
-          python upload_dropbox.py
+          # Normal user folders
+          $folders = @{
+              "Persist"   = "C:\Users\Winn_core\Persist"
+              "Desktop"   = "C:\Users\Winn_core\Desktop"
+              "Documents" = "C:\Users\Winn_core\Documents"
+              "Downloads" = "C:\Users\Winn_core\Downloads"
+              "Pictures"  = "C:\Users\Winn_core\Pictures"
+              "Videos"    = "C:\Users\Winn_core\Videos"
+              "Music"     = "C:\Users\Winn_core\Music"
+          }
+
+          foreach ($name in $folders.Keys) {
+              $source = $folders[$name]
+              if (Test-Path $source) {
+                  Copy-Item -Path $source -Destination "$backupRoot\$name" -Recurse -Force -ErrorAction SilentlyContinue
+                  Write-Host "Backed up $name"
+              }
+          }
+
+          # Smart backup for D: drive (only user-created items)
+          $dDriveBackup = Join-Path $backupRoot "D_Drive"
+          New-Item -ItemType Directory -Path $dDriveBackup -Force | Out-Null
+
+          $defaultNames = @(
+              "a", "Actions", "Temp", "tmp", "Windows", "ProgramData",
+              "Recovery", "System Volume Information", "`$Recycle.Bin",
+              "pagefile.sys", "swapfile.sys", "hiberfil.sys"
+          )
+
+          if (Test-Path "D:\") {
+              Write-Host "Scanning D: drive for user files..."
+              Get-ChildItem -Path "D:\" -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                  $itemName = $_.Name
+
+                  if ($defaultNames -contains $itemName) {
+                      Write-Host "Skipping default item: $itemName"
+                      return
+                  }
+
+                  try {
+                      Copy-Item -Path $_.FullName -Destination $dDriveBackup -Recurse -Force -ErrorAction Stop
+                      Write-Host "Backed up from D:: $itemName"
+                  }
+                  catch {
+                      Write-Host "Failed to backup $itemName : $_"
+                  }
+              }
+          } else {
+              Write-Host "D: drive not found"
+          }
 
       - name: Upload persisted data as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rdp-persist-${{ github.run_id }}
-          path: C:\Users\Winn_core\${{ env.RDP_PERSIST_REL }}
+          name: RDP-BACKUP-VM-\( {{ github.run_id }}- \){{ github.run_attempt }}
+          path: C:\backup-temp
+          if-no-files-found: warn
