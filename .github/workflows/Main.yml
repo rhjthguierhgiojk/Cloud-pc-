@@ -54,11 +54,12 @@ jobs:
 
       - name: Try restore previous backup
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: dawidd6/action-download-artifact@v3
         with:
-          pattern: RDP-BACKUP-VM-*
+          name: RDP-BACKUP-V*
           path: C:\restore-temp
-          merge-multiple: true
+          search_artifacts: true
+          workflow_conclusion: completed
 
       - name: Restore files if backup exists
         shell: powershell
@@ -69,15 +70,16 @@ jobs:
               exit 0
           }
 
-          Write-Host "Previous backup(s) found. Looking for the newest one..."
+          Write-Host "Previous backup(s) found. Selecting the newest version..."
 
+          # Try to find the highest version folder
           $backups = Get-ChildItem -Path $restorePath -Directory -ErrorAction SilentlyContinue
-          if (-not $backups) {
-              $sourceRoot = $restorePath
-          } else {
+          if ($backups) {
               $newest = $backups | Sort-Object Name -Descending | Select-Object -First 1
               $sourceRoot = $newest.FullName
               Write-Host "Using backup: $($newest.Name)"
+          } else {
+              $sourceRoot = $restorePath
           }
 
           $mapping = @{
@@ -205,7 +207,6 @@ jobs:
           $backupRoot = "C:\backup-temp"
           New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 
-          # Normal user folders
           $folders = @{
               "Persist"   = "C:\Users\Winn_core\Persist"
               "Desktop"   = "C:\Users\Winn_core\Desktop"
@@ -224,7 +225,7 @@ jobs:
               }
           }
 
-          # Smart backup for D: drive (only user-created items)
+          # Smart D: drive backup
           $dDriveBackup = Join-Path $backupRoot "D_Drive"
           New-Item -ItemType Directory -Path $dDriveBackup -Force | Out-Null
 
@@ -238,12 +239,10 @@ jobs:
               Write-Host "Scanning D: drive for user files..."
               Get-ChildItem -Path "D:\" -Force -ErrorAction SilentlyContinue | ForEach-Object {
                   $itemName = $_.Name
-
                   if ($defaultNames -contains $itemName) {
                       Write-Host "Skipping default item: $itemName"
                       return
                   }
-
                   try {
                       Copy-Item -Path $_.FullName -Destination $dDriveBackup -Recurse -Force -ErrorAction Stop
                       Write-Host "Backed up from D:: $itemName"
@@ -252,14 +251,12 @@ jobs:
                       Write-Host "Failed to backup $itemName : $_"
                   }
               }
-          } else {
-              Write-Host "D: drive not found"
           }
 
       - name: Upload persisted data as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: RDP-BACKUP-VM-\( {{ github.run_id }}- \){{ github.run_attempt }}
+          name: RDP-BACKUP-V${{ github.run_number }}
           path: C:\backup-temp
           if-no-files-found: warn
