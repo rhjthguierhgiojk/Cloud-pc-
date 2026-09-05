@@ -256,10 +256,10 @@ jobs:
               Write-Host "D: drive not found"
           }
 
-         - name: Upload persisted data as artifact
-           if: always()
-           uses: actions/upload-artifact@v4
-           with:
-           name: RDP-BACKUP-VM-\( {{ github.run_id }}- \){{ github.run_attempt }}
-           path: C:\backup-temp
+      - name: Upload persisted data as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDP-BACKUP-VM-\( {{ github.run_id }}- \){{ github.run_attempt }}
+          path: C:\backup-temp
           if-no-files-found: warn
