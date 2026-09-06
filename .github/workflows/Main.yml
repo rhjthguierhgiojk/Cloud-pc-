@@ -40,7 +40,7 @@ jobs:
 
           winget install --id Valve.Steam --accept-package-agreements --accept-source-agreements --silent
           winget install --id Discord.Discord --accept-package-agreements --accept-source-agreements --silent
-          winget install --id Windhawk.Windhawk --accept-package-agreements --accept-source-agreements --silent
+          winget install RamenSoftware.Windhawk --accept-package-agreements --accept-source-agreements --silent
           winget install --id namazso.SecureUxTheme --accept-package-agreements --accept-source-agreements --silent
 
           Write-Host "All pre-installed apps installed successfully."
@@ -54,11 +54,11 @@ jobs:
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "AppsUseLightTheme" -Value 0 -Force
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "SystemUsesLightTheme" -Value 0 -Force
 
-          # Install DDLC Theme from repository
+          # Install DDLC Theme
           $themePath = "$env:GITHUB_WORKSPACE\ddlc theme v1.deskthemepack"
           if (Test-Path $themePath) {
-              Write-Host "DDLC Theme file found. Applying with SecureUxTheme..."
-              & "C:\Program Files\Windhawk\Windhawk.exe" apply $themePath
+              Write-Host "DDLC Theme file found in repository. Applying..."
+              & "C:\Windows\Resources\Themes\ddlc theme v1.deskthemepack" apply $themePath
               Write-Host "DDLC theme applied successfully."
           } else {
               Write-Host "DDLC theme file not found in repository."
