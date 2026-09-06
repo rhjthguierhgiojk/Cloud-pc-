@@ -16,6 +16,7 @@ jobs:
     env:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
       RDP_USERNAME: Winn_core
 
     steps:
@@ -135,11 +136,11 @@ jobs:
           winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
           Write-Host "Tailscale installed via winget."
 
-      - name: Establish Tailscale Connection
+      - name: Establish Tailscale Connection (API Key)
         shell: powershell
         run: |
-          if (-not $env:TAILSCALE_AUTH_KEY) {
-            Write-Error "TAILSCALE_AUTH_KEY secret missing"
+          if (-not $env:TAILSCALE_API_KEY) {
+            Write-Error "TAILSCALE_API_KEY secret is missing. Please create a Tailscale API key in https://login.tailscale.com/admin/keys"
             exit 1
           }
 
@@ -151,7 +152,7 @@ jobs:
           }
 
           $hostname = "gh-runner-$env:GITHUB_RUN_ID"
-          & $exe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$hostname
+          & $exe up --authkey=$env:TAILSCALE_API_KEY --hostname=$hostname --accept-dns=false
           Start-Sleep -Seconds 10
 
           $tsIP = & $exe ip -4 | Select-Object -First 1
@@ -164,12 +165,12 @@ jobs:
           $ip = $env:TAILSCALE_IP
           $test = Test-NetConnection -ComputerName $ip -Port 3389 -InformationLevel Detailed
           if (-not $test.TcpTestSucceeded) {
-            Write-Error "TCP connection failed"
+            Write-Error "RDP connection failed"
             exit 1
           }
           Write-Host "RDP reachable via Tailscale."
 
-      - name: Maintain Connection + Health Check
+      - name: Maintain Connection + Smart Health Check
         shell: powershell
         run: |
           $persistDir = "C:\Users\Winn_core\$env:RDP_PERSIST_REL"
@@ -190,37 +191,41 @@ jobs:
                   break
               }
 
-              $rdpTest = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-              $tsTest = & $env:ProgramFiles\Tailscale\tailscale.exe status | Select-String -Pattern "Connected"
+              # === Smart Health Check using Tailscale status ===
+              Write-Host "Checking Tailscale connection..."
 
-              if ($rdpTest.TcpTestSucceeded -and $tsTest.Matches) {
-                  $failCount = 0
-                  Write-Host "[$(Get-Date -Format o)] RDP + Tailscale both healthy..."
-              }
-              else {
-                  $failCount++
-                  Write-Host "[$(Get-Date -Format o)] Connection issue detected (fail $failCount/$maxFails)"
+              try {
+                  $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status
 
-                  try {
-                      $apps = @("chrome", "msedge", "firefox", "code", "devenv", "GameBar", "SearchApp", "OneDrive")
-                      foreach ($app in $apps) {
-                          Get-Process -Name $app -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                  if ($tsStatus -match "Connected") {
+                      # Tailscale is connected
+                      $rdpTest = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+
+                      if ($rdpTest.TcpTestSucceeded) {
+                          $failCount = 0
+                          Write-Host "[$(Get-Date -Format o)] Tailscale + RDP both healthy..."
+                      } else {
+                          $failCount++
+                          Write-Host "[$(Get-Date -Format o)] RDP connection lost (fail $failCount/$maxFails)"
                       }
-                      Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
-                      Start-Sleep -Seconds 5
-                  }
-                  catch {
-                      Write-Host "Recovery attempt failed: $_"
-                  }
-
-                  if ($failCount -ge $maxFails) {
-                      Write-Host "=== RDP/Tailscale DEAD - Auto stopping ==="
-                      "Cloud PC became unreachable - auto stopped" | Out-File (Join-Path $persistDir "AUTO_STOPPED.txt")
-                      break
+                  } else {
+                      # Tailscale is disconnected
+                      $failCount++
+                      Write-Host "[$(Get-Date -Format o)] Tailscale connection lost (fail $failCount/$maxFails)"
                   }
               }
+              catch {
+                  $failCount++
+                  Write-Host "[$(Get-Date -Format o)] Health check failed: $_"
+              }
 
-              Start-Sleep -Seconds 120
+              if ($failCount -ge $maxFails) {
+                  Write-Host "=== RDP/Tailscale DEAD - Auto stopping ==="
+                  "Cloud PC became unreachable - auto stopped" | Out-File (Join-Path $persistDir "AUTO_STOPPED.txt")
+                  break
+              }
+
+              Start-Sleep -Seconds 60
           }
 
       - name: Prepare backup folders
