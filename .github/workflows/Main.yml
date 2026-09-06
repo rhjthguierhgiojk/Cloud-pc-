@@ -41,7 +41,7 @@ jobs:
 
           winget install --id Valve.Steam --accept-package-agreements --accept-source-agreements --silent
           winget install --id Discord.Discord --accept-package-agreements --accept-source-agreements --silent
-          winget install RamenSoftware.Windhawk --accept-package-agreements --accept-source-agreements --silent
+          winget install --id RamenSoftware.Windhawk --accept-package-agreements --accept-source-agreements --silent
           winget install --id namazso.SecureUxTheme --accept-package-agreements --accept-source-agreements --silent
 
           Write-Host "All pre-installed apps installed successfully."
@@ -59,7 +59,10 @@ jobs:
           $themePath = "$env:GITHUB_WORKSPACE\.github\workflows\ddlc theme v1.deskthemepack"
           if (Test-Path $themePath) {
               Write-Host "DDLC Theme file found at .github/workflows. Applying..."
-              & "C:\Windows\Resources\Themes\ddlc theme v1.deskthemepack" apply $themePath
+              $themeDestination = "C:\Windows\Resources\Themes\ddlc theme v1.deskthemepack"
+              Copy-Item -Path $themePath -Destination $themeDestination -Force -ErrorAction SilentlyContinue
+              Start-Process -FilePath $themeDestination -WindowStyle Hidden
+              Start-Sleep -Seconds 3
               Write-Host "DDLC theme applied successfully."
           } else {
               Write-Host "DDLC theme file not found at .github/workflows."
