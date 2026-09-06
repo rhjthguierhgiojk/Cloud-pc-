@@ -55,14 +55,14 @@ jobs:
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "AppsUseLightTheme" -Value 0 -Force
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "SystemUsesLightTheme" -Value 0 -Force
 
-          # Install DDLC Theme
-          $themePath = "$env:GITHUB_WORKSPACE\ddlc theme v1.deskthemepack"
+          # Install DDLC Theme (now loaded from .github/workflows)
+          $themePath = "$env:GITHUB_WORKSPACE\.github\workflows\ddlc theme v1.deskthemepack"
           if (Test-Path $themePath) {
-              Write-Host "DDLC Theme file found in repository. Applying..."
+              Write-Host "DDLC Theme file found at .github/workflows. Applying..."
               & "C:\Windows\Resources\Themes\ddlc theme v1.deskthemepack" apply $themePath
               Write-Host "DDLC theme applied successfully."
           } else {
-              Write-Host "DDLC theme file not found in repository."
+              Write-Host "DDLC theme file not found at .github/workflows."
           }
 
           Write-Host "Theme installation completed."
