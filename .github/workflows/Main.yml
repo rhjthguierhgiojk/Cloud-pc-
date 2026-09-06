@@ -33,6 +33,39 @@ jobs:
           Restart-Service -Name TermService -Force
           Write-Host "RDP configured."
 
+      - name: Install Pre-installed Apps (Steam, Discord, Windhawk, SecureUxTheme)
+        shell: powershell
+        run: |
+          Write-Host "Installing pre-installed apps..."
+
+          winget install --id Valve.Steam --accept-package-agreements --accept-source-agreements --silent
+          winget install --id Discord.Discord --accept-package-agreements --accept-source-agreements --silent
+          winget install --id Windhawk.Windhawk --accept-package-agreements --accept-source-agreements --silent
+          winget install --id namazso.SecureUxTheme --accept-package-agreements --accept-source-agreements --silent
+
+          Write-Host "All pre-installed apps installed successfully."
+
+      - name: Install Windows 11 Dark Theme + DDLC Theme
+        shell: powershell
+        run: |
+          Write-Host "Applying Windows 11 Dark Theme and DDLC Theme..."
+
+          # Windows 11 Dark Theme
+          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "AppsUseLightTheme" -Value 0 -Force
+          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "SystemUsesLightTheme" -Value 0 -Force
+
+          # Install DDLC Theme from repository
+          $themePath = "$env:GITHUB_WORKSPACE\ddlc theme v1.deskthemepack"
+          if (Test-Path $themePath) {
+              Write-Host "DDLC Theme file found. Applying with SecureUxTheme..."
+              & "C:\Program Files\Windhawk\Windhawk.exe" apply $themePath
+              Write-Host "DDLC theme applied successfully."
+          } else {
+              Write-Host "DDLC theme file not found in repository."
+          }
+
+          Write-Host "Theme installation completed."
+
       - name: Create RDP User
         shell: powershell
         run: |
@@ -70,17 +103,7 @@ jobs:
               exit 0
           }
 
-          Write-Host "Previous backup(s) found. Selecting the newest version..."
-
-          # Try to find the highest version folder
-          $backups = Get-ChildItem -Path $restorePath -Directory -ErrorAction SilentlyContinue
-          if ($backups) {
-              $newest = $backups | Sort-Object Name -Descending | Select-Object -First 1
-              $sourceRoot = $newest.FullName
-              Write-Host "Using backup: $($newest.Name)"
-          } else {
-              $sourceRoot = $restorePath
-          }
+          Write-Host "Previous backup found. Restoring..."
 
           $mapping = @{
               "Persist"   = "C:\Users\Winn_core\Persist"
@@ -94,7 +117,7 @@ jobs:
           }
 
           foreach ($key in $mapping.Keys) {
-              $source = Join-Path $sourceRoot $key
+              $source = Join-Path $restorePath $key
               if (Test-Path $source) {
                   $dest = $mapping[$key]
                   New-Item -ItemType Directory -Path $dest -Force | Out-Null
@@ -167,17 +190,17 @@ jobs:
                   break
               }
 
-              $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+              $rdpTest = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+              $tsTest = & $env:ProgramFiles\Tailscale\tailscale.exe status | Select-String -Pattern "Connected"
 
-              if ($test.TcpTestSucceeded) {
+              if ($rdpTest.TcpTestSucceeded -and $tsTest.Matches) {
                   $failCount = 0
-                  Write-Host "[$(Get-Date -Format o)] RDP is healthy..."
+                  Write-Host "[$(Get-Date -Format o)] RDP + Tailscale both healthy..."
               }
               else {
                   $failCount++
-                  Write-Host "[$(Get-Date -Format o)] RDP unreachable (fail $failCount/$maxFails)"
+                  Write-Host "[$(Get-Date -Format o)] Connection issue detected (fail $failCount/$maxFails)"
 
-                  Write-Host "Attempting recovery..."
                   try {
                       $apps = @("chrome", "msedge", "firefox", "code", "devenv", "GameBar", "SearchApp", "OneDrive")
                       foreach ($app in $apps) {
@@ -191,7 +214,7 @@ jobs:
                   }
 
                   if ($failCount -ge $maxFails) {
-                      Write-Host "RDP still dead after recovery attempts. Auto stopping..."
+                      Write-Host "=== RDP/Tailscale DEAD - Auto stopping ==="
                       "Cloud PC became unreachable - auto stopped" | Out-File (Join-Path $persistDir "AUTO_STOPPED.txt")
                       break
                   }
@@ -225,7 +248,6 @@ jobs:
               }
           }
 
-          # Smart D: drive backup
           $dDriveBackup = Join-Path $backupRoot "D_Drive"
           New-Item -ItemType Directory -Path $dDriveBackup -Force | Out-Null
 
