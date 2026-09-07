@@ -88,17 +88,8 @@ jobs:
       - name: Create RDP User
         shell: powershell
         run: |
-          $username = $env:RDP_USERNAME
-
-          # Prefer storing this password as a GitHub secret:
-          # RDP_PASSWORD
-          $password = "${{ secrets.RDP_PASSWORD }}"
-
-          if (-not $password) {
-              Write-Error "RDP_PASSWORD secret is missing."
-              exit 1
-          }
-
+          $username = "Winn_core"
+          $password = "Elol..92"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
@@ -203,48 +194,23 @@ jobs:
         shell: powershell
         run: |
           if (-not $env:TAILSCALE_AUTH_KEY) {
-              Write-Error "TAILSCALE_AUTH_KEY secret is missing."
-              exit 1
+            Write-Error "TAILSCALE_AUTH_KEY secret is missing."
+            exit 1
           }
 
           Start-Sleep -Seconds 5
 
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
-
           if (-not (Test-Path $exe)) {
-              $exe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-          }
-
-          if (-not (Test-Path $exe)) {
-              Write-Error "Tailscale executable not found."
-              exit 1
+            $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
           }
 
           $hostname = "gh-runner-$env:GITHUB_RUN_ID"
-
-          Write-Host "Connecting runner to Tailscale..."
-
-          & $exe up `
-            --auth-key=$env:TAILSCALE_AUTH_KEY `
-            --hostname=$hostname `
-            --accept-dns=false
-
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "Tailscale authentication failed."
-              exit 1
-          }
-
+          & $exe up --auth-key=$env:TAILSCALE_AUTH_KEY --hostname=$hostname --accept-dns=false
           Start-Sleep -Seconds 10
 
           $tsIP = & $exe ip -4 | Select-Object -First 1
-
-          if (-not $tsIP) {
-              Write-Error "Failed to obtain Tailscale IPv4 address."
-              exit 1
-          }
-
-          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
 
       - name: Verify RDP Accessibility
