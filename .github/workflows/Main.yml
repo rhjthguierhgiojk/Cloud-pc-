@@ -16,6 +16,7 @@ jobs:
     env:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
       RDP_USERNAME: Winn_core
       RDP_PASSWORD: Elol..92
 
@@ -49,129 +50,6 @@ jobs:
 
           Write-Host "All pre-installed apps installed successfully."
 
-      - name: Install Windows 11 Dark Theme + DDLC Theme
-        shell: powershell
-        run: |
-          Write-Host "Applying Windows 11 Dark Theme and DDLC Theme..."
-
-          # GitHub Actions runs as a service account. HKCU therefore belongs
-          # to the runner, not the RDP user. Configure Winn_core directly.
-          $username = $env:RDP_USERNAME
-          $userProfile = "C:\Users\$username"
-          $themeSource = "$env:GITHUB_WORKSPACE\.github\workflows\ddlc theme v1.deskthemepack"
-          $themeRoot = Join-Path $userProfile "AppData\Local\Microsoft\Windows\Themes"
-          $themeWork = "C:\ddlc-theme-work"
-          $ntUser = Join-Path $userProfile "NTUSER.DAT"
-          $hiveName = "RDP_THEME_USER"
-          $hive = "HKU\$hiveName"
-
-          function Unload-RdpHive {
-              # Use Start-Process so reg.exe's stderr does not become a
-              # PowerShell NativeCommandError in GitHub Actions.
-              for ($attempt = 1; $attempt -le 5; $attempt++) {
-                  $p = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
-                    -ArgumentList @("unload", $hive) `
-                    -Wait -PassThru -WindowStyle Hidden
-                  if ($p.ExitCode -eq 0) {
-                      return $true
-                  }
-                  Start-Sleep -Seconds 1
-              }
-              return $false
-          }
-
-          # A fresh runner normally has no temporary hive loaded. Ignore the
-          # result here; this is only cleanup for a previous interrupted run.
-          Unload-RdpHive | Out-Null
-
-          # Install/extract the DDLC theme package first.
-          if (-not (Test-Path $themeSource)) {
-              Write-Warning "DDLC theme file not found at: $themeSource"
-          }
-          else {
-              Write-Host "DDLC Theme found: $themeSource"
-
-              New-Item -ItemType Directory -Path $themeRoot -Force | Out-Null
-
-              if (Test-Path $themeWork) {
-                  Remove-Item $themeWork -Recurse -Force -ErrorAction SilentlyContinue
-              }
-              New-Item -ItemType Directory -Path $themeWork -Force | Out-Null
-
-              # .deskthemepack is a CAB archive.
-              & "$env:WINDIR\System32\expand.exe" -F:* $themeSource $themeWork
-
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Failed to extract the DDLC theme package."
-                  exit 1
-              }
-
-              $themeFile = Get-ChildItem -Path $themeWork -Filter "*.theme" -File -Recurse | Select-Object -First 1
-
-              if (-not $themeFile) {
-                  Write-Error "No .theme file was found inside the DDLC theme package."
-                  exit 1
-              }
-
-              $installedTheme = Join-Path $themeRoot $themeFile.Name
-              Copy-Item -Path $themeFile.FullName -Destination $installedTheme -Force
-
-              # Preserve package assets such as DesktopBackground and cursors.
-              Get-ChildItem -Path $themeWork -File -Recurse |
-                  Where-Object { $_.FullName -ne $themeFile.FullName } |
-                  ForEach-Object {
-                      $relative = $_.FullName.Substring($themeWork.Length).TrimStart('\')
-                      $destination = Join-Path $themeRoot $relative
-                      New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
-                      Copy-Item -Path $_.FullName -Destination $destination -Force
-                  }
-
-              Write-Host "DDLC theme installed to: $installedTheme"
-
-              # Load Winn_core's hive without allowing native stderr to
-              # become a terminating PowerShell error.
-              $load = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
-                -ArgumentList @("load", $hive, $ntUser) `
-                -Wait -PassThru -WindowStyle Hidden
-              if ($load.ExitCode -ne 0) {
-                  Write-Error "Could not load the registry hive for $username."
-                  exit 1
-              }
-
-              try {
-                  # Use reg.exe directly instead of Registry:: paths so the
-                  # PowerShell Registry provider never holds the hive open.
-                  $r1 = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
-                    -ArgumentList @("add", "$hive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "/v", "AppsUseLightTheme", "/t", "REG_DWORD", "/d", "0", "/f") `
-                    -Wait -PassThru -WindowStyle Hidden
-
-                  $r2 = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
-                    -ArgumentList @("add", "$hive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "/v", "SystemUsesLightTheme", "/t", "REG_DWORD", "/d", "0", "/f") `
-                    -Wait -PassThru -WindowStyle Hidden
-
-                  $r3 = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
-                    -ArgumentList @("add", "$hive\Software\Microsoft\Windows\CurrentVersion\Themes", "/v", "CurrentTheme", "/t", "REG_SZ", "/d", "$installedTheme", "/f") `
-                    -Wait -PassThru -WindowStyle Hidden
-
-                  if (($r1.ExitCode -ne 0) -or ($r2.ExitCode -ne 0) -or ($r3.ExitCode -ne 0)) {
-                      Write-Warning "One or more theme registry settings could not be written."
-                  }
-                  else {
-                      Write-Host "Dark mode and DDLC theme configured for $username."
-                  }
-              }
-              finally {
-                  # Retry unload, but do not turn a successful theme install
-                  # into a failed GitHub job merely because Windows delays it.
-                  if (-not (Unload-RdpHive)) {
-                      Write-Warning "Theme settings were written, but Windows did not release the user hive immediately."
-                  }
-              }
-          }
-
-          Remove-Item $themeWork -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "Theme installation completed."
-
       - name: Create RDP User
         shell: powershell
         run: |
@@ -204,6 +82,140 @@ jobs:
             -ItemType Directory `
             -Path $persist `
             -Force | Out-Null
+
+      - name: Install Windows 11 Dark Theme + DDLC Theme
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "Applying DDLC theme for RDP user..."
+
+          $username = $env:RDP_USERNAME
+          if (-not $username) {
+              Write-Error "RDP_USERNAME is missing."
+              exit 1
+          }
+
+          $userProfile = "C:\Users\$username"
+          $themeSource = Join-Path $env:GITHUB_WORKSPACE ".github\workflows\ddlc theme v1.deskthemepack"
+          $themeRoot = Join-Path $userProfile "AppData\Local\Microsoft\Windows\Themes"
+          $themeWork = "C:\ddlc-theme-work"
+          $wallpaperTarget = Join-Path $themeRoot "DDLC-Wallpaper.png"
+          $ntUser = Join-Path $userProfile "NTUSER.DAT"
+          $hiveName = "RDP_THEME_USER"
+
+          if (-not (Test-Path $userProfile)) {
+              Write-Error "RDP user profile was not created: $userProfile"
+              exit 1
+          }
+
+          if (-not (Test-Path $themeSource)) {
+              Write-Error "DDLC theme package was not found: $themeSource"
+              exit 1
+          }
+
+          New-Item -ItemType Directory -Path $themeRoot -Force | Out-Null
+
+          # Extract the .deskthemepack without launching it as SYSTEM.
+          Remove-Item $themeWork -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $themeWork -Force | Out-Null
+
+          & "$env:WINDIR\System32\expand.exe" -F:* "$themeSource" "$themeWork"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to extract the DDLC theme package."
+              exit 1
+          }
+
+          $themeFile = Get-ChildItem $themeWork -Filter "*.theme" -File -Recurse | Select-Object -First 1
+          $wallpaperFile = Get-ChildItem $themeWork -File -Recurse |
+              Where-Object { $_.Extension -match '^\.(png|jpg|jpeg)$' } |
+              Select-Object -First 1
+
+          if (-not $themeFile) {
+              Write-Error "No .theme file was found in the DDLC package."
+              exit 1
+          }
+
+          if (-not $wallpaperFile) {
+              Write-Error "No wallpaper image was found in the DDLC package."
+              exit 1
+          }
+
+          # Put the wallpaper in a stable location inside the user's profile.
+          Copy-Item $wallpaperFile.FullName $wallpaperTarget -Force
+          Write-Host "DDLC wallpaper installed: $wallpaperTarget"
+
+          # Copy the theme and package assets.
+          $installedTheme = Join-Path $themeRoot $themeFile.Name
+          Copy-Item $themeFile.FullName $installedTheme -Force
+
+          Get-ChildItem $themeWork -File -Recurse |
+              Where-Object { $_.FullName -ne $themeFile.FullName -and $_.FullName -ne $wallpaperFile.FullName } |
+              ForEach-Object {
+                  $relative = $_.FullName.Substring($themeWork.Length).TrimStart('\')
+                  $destination = Join-Path $themeRoot $relative
+                  $destinationParent = Split-Path $destination -Parent
+                  New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+                  Copy-Item $_.FullName $destination -Force
+              }
+
+          if (-not (Test-Path $ntUser)) {
+              Write-Error "NTUSER.DAT was not found: $ntUser"
+              exit 1
+          }
+
+          # Configure Winn_core's HKCU directly. The theme step is now AFTER
+          # Create RDP User, so this profile exists before we touch it.
+          $loaded = $false
+          try {
+              & reg.exe load "HKU\$hiveName" "$ntUser" 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Could not load $ntUser into HKU\$hiveName."
+                  exit 1
+              }
+              $loaded = $true
+
+              $base = "HKU\$hiveName\Software\Microsoft\Windows\CurrentVersion"
+              $personalize = "$base\Themes\Personalize"
+              $themes = "$base\Themes"
+              $desktop = "$base\Explorer\Wallpapers"
+
+              # Windows dark mode.
+              & reg.exe add $personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f 2>$null | Out-Null
+              & reg.exe add $personalize /v SystemUsesLightTheme /t REG_DWORD /d 0 /f 2>$null | Out-Null
+
+              # Explicitly select the installed theme.
+              & reg.exe add $themes /v CurrentTheme /t REG_SZ /d "$installedTheme" /f 2>$null | Out-Null
+
+              # Explicitly set the DDLC wallpaper. This is the important part:
+              # it does not depend on Windows successfully parsing/activating
+              # the .theme file.
+              & reg.exe add $desktop /v Background /t REG_SZ /d "$wallpaperTarget" /f 2>$null | Out-Null
+              & reg.exe add $desktop /v SlideshowEnabled /t REG_DWORD /d 0 /f 2>$null | Out-Null
+
+              Write-Host "Dark mode + CurrentTheme + DDLC wallpaper configured for $username."
+          }
+          finally {
+              if ($loaded) {
+                  # The profile may be briefly locked by Windows. Retry unload.
+                  $unloaded = $false
+                  for ($attempt = 1; $attempt -le 10; $attempt++) {
+                      & reg.exe unload "HKU\$hiveName" 2>$null | Out-Null
+                      if ($LASTEXITCODE -eq 0) {
+                          $unloaded = $true
+                          break
+                      }
+                      Start-Sleep -Milliseconds 500
+                  }
+
+                  if (-not $unloaded) {
+                      Write-Warning "Could not unload HKU\$hiveName immediately; Windows may release it later."
+                  }
+              }
+          }
+
+          Remove-Item $themeWork -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "DDLC theme installation completed."
 
       - name: Try restore previous backup
         continue-on-error: true
@@ -336,7 +348,7 @@ jobs:
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "IP       : $env:TAILSCALE_IP"
           Write-Host "Username : $env:RDP_USERNAME"
-          Write-Host "Password. : $env:RDP_PASSWORD"
+          Write-Host "Password  : $env:RDP_PASSWORD"
           Write-Host "Persist  : $persistDir"
           Write-Host "==================`n"
 
