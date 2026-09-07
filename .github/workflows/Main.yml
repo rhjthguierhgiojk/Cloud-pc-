@@ -17,6 +17,7 @@ jobs:
       RDP_PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       RDP_USERNAME: Winn_core
+      RDP_PASSWORD: Elol..92
 
     steps:
 
@@ -65,20 +66,22 @@ jobs:
           $hive = "HKU\$hiveName"
 
           function Unload-RdpHive {
-              # Do not use the PowerShell Registry provider here. It can keep
-              # registry handles open and make reg.exe unload return ACCESS DENIED.
+              # Use Start-Process so reg.exe's stderr does not become a
+              # PowerShell NativeCommandError in GitHub Actions.
               for ($attempt = 1; $attempt -le 5; $attempt++) {
-                  & "$env:WINDIR\System32\reg.exe" unload $hive 2>$null | Out-Null
-                  if ($LASTEXITCODE -eq 0) {
+                  $p = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
+                    -ArgumentList @("unload", $hive) `
+                    -Wait -PassThru -WindowStyle Hidden
+                  if ($p.ExitCode -eq 0) {
                       return $true
                   }
                   Start-Sleep -Seconds 1
               }
-              Write-Warning "Could not unload $hive after 5 attempts."
               return $false
           }
 
-          # Remove a stale temporary hive if a previous attempt left it loaded.
+          # A fresh runner normally has no temporary hive loaded. Ignore the
+          # result here; this is only cleanup for a previous interrupted run.
           Unload-RdpHive | Out-Null
 
           # Install/extract the DDLC theme package first.
@@ -125,9 +128,12 @@ jobs:
 
               Write-Host "DDLC theme installed to: $installedTheme"
 
-              # Load Winn_core's hive.
-              & "$env:WINDIR\System32\reg.exe" load $hive $ntUser | Out-Null
-              if ($LASTEXITCODE -ne 0) {
+              # Load Winn_core's hive without allowing native stderr to
+              # become a terminating PowerShell error.
+              $load = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
+                -ArgumentList @("load", $hive, $ntUser) `
+                -Wait -PassThru -WindowStyle Hidden
+              if ($load.ExitCode -ne 0) {
                   Write-Error "Could not load the registry hive for $username."
                   exit 1
               }
@@ -135,16 +141,19 @@ jobs:
               try {
                   # Use reg.exe directly instead of Registry:: paths so the
                   # PowerShell Registry provider never holds the hive open.
-                  & "$env:WINDIR\System32\reg.exe" add "$hive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" `
-                    /v AppsUseLightTheme /t REG_DWORD /d 0 /f | Out-Null
+                  $r1 = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
+                    -ArgumentList @("add", "$hive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "/v", "AppsUseLightTheme", "/t", "REG_DWORD", "/d", "0", "/f") `
+                    -Wait -PassThru -WindowStyle Hidden
 
-                  & "$env:WINDIR\System32\reg.exe" add "$hive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" `
-                    /v SystemUsesLightTheme /t REG_DWORD /d 0 /f | Out-Null
+                  $r2 = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
+                    -ArgumentList @("add", "$hive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "/v", "SystemUsesLightTheme", "/t", "REG_DWORD", "/d", "0", "/f") `
+                    -Wait -PassThru -WindowStyle Hidden
 
-                  & "$env:WINDIR\System32\reg.exe" add "$hive\Software\Microsoft\Windows\CurrentVersion\Themes" `
-                    /v CurrentTheme /t REG_SZ /d "$installedTheme" /f | Out-Null
+                  $r3 = Start-Process -FilePath "$env:WINDIR\System32\reg.exe" `
+                    -ArgumentList @("add", "$hive\Software\Microsoft\Windows\CurrentVersion\Themes", "/v", "CurrentTheme", "/t", "REG_SZ", "/d", "$installedTheme", "/f") `
+                    -Wait -PassThru -WindowStyle Hidden
 
-                  if ($LASTEXITCODE -ne 0) {
+                  if (($r1.ExitCode -ne 0) -or ($r2.ExitCode -ne 0) -or ($r3.ExitCode -ne 0)) {
                       Write-Warning "One or more theme registry settings could not be written."
                   }
                   else {
@@ -167,7 +176,7 @@ jobs:
         shell: powershell
         run: |
           $username = $env:RDP_USERNAME
-          $password = "Elol..92"
+          $password = $env:RDP_PASSWORD
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
