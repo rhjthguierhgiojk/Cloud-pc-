@@ -9,7 +9,7 @@ on:
         default: Persist
 
 jobs:
-  secure-rdp:
+  vm-github:
     runs-on: windows-latest
     timeout-minutes: 360
 
@@ -53,36 +53,106 @@ jobs:
         run: |
           Write-Host "Applying Windows 11 Dark Theme and DDLC Theme..."
 
-          # Windows 11 Dark Theme
-          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "AppsUseLightTheme" -Value 0 -Force
-          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name "SystemUsesLightTheme" -Value 0 -Force
+          # GitHub Actions runs outside the interactive RDP user's session.
+          # Therefore HKCU belongs to the runner, not Winn_core. Configure
+          # Winn_core's profile and registry hive directly.
+          $username = $env:RDP_USERNAME
+          $userProfile = "C:\Users\$username"
+          $themeSource = "$env:GITHUB_WORKSPACE\.github\workflows\ddlc theme v1.deskthemepack"
+          $themeRoot = Join-Path $userProfile "AppData\Local\Microsoft\Windows\Themes"
+          $themeWork = "C:\ddlc-theme-work"
+          $ntUser = Join-Path $userProfile "NTUSER.DAT"
+          $hive = "HKU\RDP_THEME_USER"
 
-          # Install DDLC Theme
-          $themePath = "$env:GITHUB_WORKSPACE\.github\workflows\ddlc theme v1.deskthemepack"
+          # Configure Windows 11 dark mode for the RDP user.
+          if (Test-Path $ntUser) {
+              reg unload $hive 2>$null | Out-Null
+              reg load $hive $ntUser | Out-Null
 
-          if (Test-Path $themePath) {
-              Write-Host "DDLC Theme file found at .github/workflows. Applying..."
+              if ($LASTEXITCODE -eq 0) {
+                  try {
+                      $personalize = "Registry::HKEY_USERS\RDP_THEME_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+                      New-Item -Path $personalize -Force | Out-Null
+                      Set-ItemProperty -Path $personalize -Name "AppsUseLightTheme" -Value 0 -Type DWord -Force
+                      Set-ItemProperty -Path $personalize -Name "SystemUsesLightTheme" -Value 0 -Type DWord -Force
+                  }
+                  finally {
+                      reg unload $hive 2>$null | Out-Null
+                  }
+                  Write-Host "Dark mode configured for $username."
+              }
+              else {
+                  Write-Warning "Could not load the RDP user's registry hive."
+              }
+          }
 
-              $themeDestination = "C:\Windows\Resources\Themes\ddlc theme v1.deskthemepack"
+          # Install the DDLC .deskthemepack for the RDP user.
+          if (Test-Path $themeSource) {
+              Write-Host "DDLC Theme found: $themeSource"
 
-              Copy-Item `
-                -Path $themePath `
-                -Destination $themeDestination `
-                -Force `
-                -ErrorAction SilentlyContinue
+              New-Item -ItemType Directory -Path $themeRoot -Force | Out-Null
 
-              Start-Process `
-                -FilePath $themeDestination `
-                -WindowStyle Hidden
+              if (Test-Path $themeWork) {
+                  Remove-Item $themeWork -Recurse -Force -ErrorAction SilentlyContinue
+              }
+              New-Item -ItemType Directory -Path $themeWork -Force | Out-Null
 
-              Start-Sleep -Seconds 3
+              # A .deskthemepack is a CAB archive. Extract it instead of
+              # launching it as SYSTEM, which would target the wrong user.
+              & "$env:WINDIR\System32\expand.exe" -F:* $themeSource $themeWork
 
-              Write-Host "DDLC theme applied successfully."
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Failed to extract the DDLC theme package."
+                  exit 1
+              }
+
+              $themeFile = Get-ChildItem -Path $themeWork -Filter "*.theme" -File -Recurse | Select-Object -First 1
+
+              if (-not $themeFile) {
+                  Write-Error "No .theme file was found inside the DDLC theme package."
+                  exit 1
+              }
+
+              $installedTheme = Join-Path $themeRoot $themeFile.Name
+              Copy-Item -Path $themeFile.FullName -Destination $installedTheme -Force
+
+              # Copy wallpapers/sounds/assets contained in the package.
+              Get-ChildItem -Path $themeWork -File -Recurse |
+                  Where-Object { $_.FullName -ne $themeFile.FullName } |
+                  ForEach-Object {
+                      $relative = $_.FullName.Substring($themeWork.Length).TrimStart('\')
+                      $destination = Join-Path $themeRoot $relative
+                      New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+                      Copy-Item -Path $_.FullName -Destination $destination -Force
+                  }
+
+              # Select the theme in Winn_core's registry hive.
+              reg unload $hive 2>$null | Out-Null
+              reg load $hive $ntUser | Out-Null
+
+              if ($LASTEXITCODE -eq 0) {
+                  try {
+                      $themeReg = "Registry::HKEY_USERS\RDP_THEME_USER\Software\Microsoft\Windows\CurrentVersion\Themes"
+                      New-Item -Path $themeReg -Force | Out-Null
+                      Set-ItemProperty -Path $themeReg -Name "CurrentTheme" -Value $installedTheme -Force
+                  }
+                  finally {
+                      reg unload $hive 2>$null | Out-Null
+                  }
+                  Write-Host "DDLC theme selected for $username."
+              }
+              else {
+                  Write-Warning "Could not reload the RDP user's registry hive."
+              }
+
+              Write-Host "DDLC theme installed to: $installedTheme"
           }
           else {
-              Write-Host "DDLC theme file not found at .github/workflows."
+              Write-Warning "DDLC theme file not found at: $themeSource"
+              Write-Warning "Expected: .github/workflows/ddlc theme v1.deskthemepack"
           }
 
+          Remove-Item $themeWork -Recurse -Force -ErrorAction SilentlyContinue
           Write-Host "Theme installation completed."
 
       - name: Create RDP User
@@ -249,6 +319,7 @@ jobs:
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "IP       : $env:TAILSCALE_IP"
           Write-Host "Username : $env:RDP_USERNAME"
+          Write-Host "Password : $env:RDP_PASSWORD"
           Write-Host "Persist  : $persistDir"
           Write-Host "==================`n"
 
@@ -408,3 +479,4 @@ jobs:
           name: RDP-BACKUP-V${{ github.run_number }}
           path: C:\backup-temp
           if-no-files-found: warn
+          
