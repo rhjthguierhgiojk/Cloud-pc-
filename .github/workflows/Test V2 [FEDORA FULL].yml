@@ -39,26 +39,26 @@ jobs:
           qemu-system-x86_64 --version
           qemu-img --version
 
-      - name: Download & prepare Fedora disks (C: system + D: data)
-        shell: bash
-        run: |
-          set -euo pipefail
-          URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
-          SHA256="28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+             - name: Download & prepare Fedora disks (C: system + D: data)
+               shell: bash
+               run: |
+               set -euo pipefail
+               URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+               SHA256="28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 
-          echo "Downloading Fedora Cloud image (will become C: system disk)..."
-          curl -fL --retry 5 --retry-delay 5 -o fedora-system.qcow2 "$URL"
-          echo "$SHA256  fedora-system.qcow2" | sha256sum -c -
+               echo "Downloading Fedora Cloud image (will become C: system disk)..."
+               curl -fL --retry 5 --retry-delay 5 -o fedora-system.qcow2 "$URL"
+               echo "$SHA256  fedora-system.qcow2" | sha256sum -c -
 
-          # C: System disk (30 GB)
-          qemu-img resize fedora-system.qcow2 30G
-          echo "C: (system) disk ready:"
-          ls -lh fedora-system.qcow2
+               # C: System disk (30 GB)
+               qemu-img resize fedora-system.qcow2 30G
+               echo "C: (system) disk ready:"
+               ls -lh fedora-system.qcow2
 
-          # D: Data / Programs disk (30 GB)
-          qemu-img create -f qcow2 fedora-data.qcow2 30G
-          echo "D: (data/programs) disk ready:"
-          ls -lh fedora-data.qcow2
+               # D: Data / Programs disk (30 GB)
+               qemu-img create -f qcow2 fedora-data.qcow2 30G
+               echo "D: (data/programs) disk ready:"
+               ls -lh fedora-data.qcow2
 
       - name: Prepare optional DDLC wallpaper
         shell: bash
