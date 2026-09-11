@@ -1,0 +1,389 @@
+name: Fedora Cloud PC v2 (KDE + xrdp + Tailscale + Wine/Proton)
+
+on:
+  workflow_dispatch:
+    inputs:
+      persist-path:
+        description: "Folder in /home/Winn_core to preserve"
+        required: false
+        default: Persist
+
+jobs:
+  VM-GITHUB-FEDORA:
+    # GitHub-hosted Actions has no fedora-latest runner label.
+    # Ubuntu hosts a real Fedora 44 guest through QEMU.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      RDP_USERNAME: Winn_core
+      RDP_PASSWORD: ${{ secrets. RDP_PASSWORD }}
+      PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install QEMU, cloud-init tools and archive tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage curl p7zip-full
+          qemu-system-x86_64 --version
+          qemu-img --version
+
+      - name: Download and verify Fedora 44 Cloud image
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+          SHA256="28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+          curl -fL --retry 5 -o fedora-base.qcow2 "$URL"
+          echo "$SHA256  fedora-base.qcow2" | sha256sum -c -
+          # Keep the guest disk small enough for a standard GitHub-hosted runner.
+          qemu-img resize fedora-base.qcow2 12G
+
+      - name: Prepare optional DDLC wallpaper from repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ddlc-extract ddlc-wallpaper.bin
+          mkdir -p ddlc-extract
+
+          theme=".github/workflows/ddlc theme v1.deskthemepack"
+          if [[ -f "$theme" ]]; then
+            echo "DDLC theme package found: $theme"
+            7z x -y "$theme" -oddlc-extract >/dev/null || true
+            wallpaper="$(find ddlc-extract -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | head -n 1 || true)"
+            if [[ -n "$wallpaper" ]]; then
+              cp "$wallpaper" ddlc-wallpaper.bin
+              echo "DDLC wallpaper selected: $wallpaper"
+            else
+              echo "No image was found inside the DDLC theme package; continuing without it."
+            fi
+          else
+            echo "DDLC theme package not found; continuing without it."
+          fi
+
+      - name: Create Fedora cloud-init configuration
+        shell: bash
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          VM_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "${TS_KEY:-}" ]] || { echo "::error::TAILSCALE_AUTH_KEY secret is missing."; exit 1; }
+          [[ -n "${VM_PASSWORD:-}" ]] || { echo "::error::RDP_PASSWORD secret is missing."; exit 1; }
+
+          mkdir -p seed
+          wallpaper_b64=""
+          wallpaper_name=""
+          if [[ -f ddlc-wallpaper.bin ]]; then
+            wallpaper_b64="$(base64 -w0 ddlc-wallpaper.bin)"
+            wallpaper_name="$(basename "$(find ddlc-extract -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | head -n1)")"
+          fi
+
+          cat > seed/user-data <<'CLOUDINIT'
+          #cloud-config
+          hostname: fedora-cloud-pc
+          package_update: true
+          package_upgrade: true
+          
+          users:
+            - name: Winn_core
+              gecos: Fedora Cloud PC
+              groups: [wheel]
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+              plain_text_passwd: __RDP_PASSWORD__
+          
+          chpasswd:
+            expire: false
+          
+          packages:
+            - plasma-desktop
+            - plasma-workspace-x11
+            - kde-settings
+            - xrdp
+            - xorgxrdp
+            - dbus-x11
+            - NetworkManager
+            - curl
+            - wget
+            - git
+            - unzip
+            - tar
+            - p7zip
+            - firewalld
+            - pipewire
+            - pipewire-pulseaudio
+            - wireplumber
+            - wine
+            - wine-ntsync
+            - winetricks
+            - cabextract
+            - fuse
+            - fuse-libs
+            - mesa-dri-drivers
+            - mesa-vulkan-drivers
+          
+          write_files:
+            - path: /etc/xrdp/startwm.sh
+              permissions: '0755'
+              content: |
+                #!/bin/sh
+                export LANG=en_US.UTF-8
+                export LC_ALL=en_US.UTF-8
+                export XDG_CURRENT_DESKTOP=KDE
+                export XDG_SESSION_DESKTOP=KDE
+                export DESKTOP_SESSION=plasma
+                export KDE_SESSION_VERSION=6
+                unset DBUS_SESSION_BUS_ADDRESS
+                exec dbus-run-session -- startplasma-x11
+          
+            - path: /etc/tailscale-auth-key
+              permissions: '0600'
+              content: |
+                __TAILSCALE_AUTH_KEY__
+          
+            - path: /usr/local/sbin/fedora-cloud-finalize.sh
+              permissions: '0755'
+              content: |
+                #!/bin/bash
+                set -euo pipefail
+          
+                systemctl enable --now NetworkManager
+                systemctl enable --now firewalld
+                systemctl enable --now xrdp
+          
+                firewall-cmd --permanent --add-service=ssh || true
+                firewall-cmd --permanent --add-port=3389/tcp || true
+                firewall-cmd --reload || true
+          
+                # Wine/Proton support. Fedora 44 enables the NTSYNC path for packages
+                # such as Wine and Steam when the corresponding package is installed.
+                dnf -y install wine wine-ntsync winetricks cabextract || true
+          
+                # Add RPM Fusion so Steam/Proton can be installed on Fedora.
+                dnf -y install \
+                  https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+                  https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm || true
+                dnf -y makecache || true
+                dnf -y install steam || true
+          
+                # Create a normal Wine prefix for the RDP user without blocking xrdp.
+                install -d -o Winn_core -g Winn_core /home/Winn_core/.wine
+                runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine wineboot -u || true
+                runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine winetricks -q corefonts || true
+          
+                # A Windows-style KDE layout: bottom panel, application launcher,
+                # task manager and system tray are deliberately kept enabled.
+                runuser -u Winn_core -- dbus-run-session kwriteconfig6 --file kdeglobals --group KDE --key SingleClick false || true
+                runuser -u Winn_core -- dbus-run-session kwriteconfig6 --file kwinrc --group Compositing --key Enabled true || true
+          
+                # If a DDLC wallpaper was embedded by the GitHub runner, install it.
+                if [[ -s /home/Winn_core/.ddlc-wallpaper.b64 ]]; then
+                  base64 -d /home/Winn_core/.ddlc-wallpaper.b64 > /home/Winn_core/.ddlc-wallpaper
+                  chown Winn_core:Winn_core /home/Winn_core/.ddlc-wallpaper
+                  chmod 0644 /home/Winn_core/.ddlc-wallpaper
+                fi
+          
+                # Tailscale inside the Fedora guest.
+                if ! command -v tailscale >/dev/null 2>&1; then
+                  curl -fsSL https://tailscale.com/install.sh | sh
+                fi
+                systemctl enable --now tailscaled
+                TS_KEY="$(cat /etc/tailscale-auth-key)"
+                tailscale up --auth-key="${TS_KEY}" --hostname="fedora-gh-__GITHUB_RUN_ID__" --accept-dns=false
+                rm -f /etc/tailscale-auth-key
+          
+                TS_IP="$(tailscale ip -4 | head -n1 || true)"
+                echo "Tailscale IPv4: ${TS_IP}" | tee /home/Winn_core/TAILSCALE_IP.txt
+                chown Winn_core:Winn_core /home/Winn_core/TAILSCALE_IP.txt
+          
+                loginctl enable-linger Winn_core || true
+                systemctl restart xrdp || true
+          
+                echo "Fedora Cloud PC setup complete."
+                echo "Tailscale IPv4: ${TS_IP}"
+          
+            - path: /etc/systemd/system/fedora-cloud-setup.service
+              permissions: '0644'
+              content: |
+                [Unit]
+                Description=Fedora Cloud PC final setup
+                After=network-online.target
+                Wants=network-online.target
+          
+                [Service]
+                Type=oneshot
+                RemainAfterExit=yes
+                ExecStart=/usr/local/sbin/fedora-cloud-finalize.sh
+          
+                [Install]
+                WantedBy=multi-user.target
+          
+          runcmd:
+            - systemctl daemon-reload
+            - systemctl enable --now fedora-cloud-setup.service
+            - touch /home/Winn_core/FEDORA_CLOUD_PC_READY
+            - chown Winn_core:Winn_core /home/Winn_core/FEDORA_CLOUD_PC_READY
+          
+          final_message: "Fedora Cloud PC v2 initialization complete."
+          CLOUDINIT
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path('seed/user-data')
+          s = p.read_text()
+          s = s.replace('__RDP_PASSWORD__', os.environ['VM_PASSWORD'])
+          s = s.replace('__TAILSCALE_AUTH_KEY__', os.environ['TS_KEY'])
+          s = s.replace('__GITHUB_RUN_ID__', os.environ['GITHUB_RUN_ID'])
+          p.write_text(s)
+          PY
+
+          if [[ -n "$wallpaper_b64" ]]; then
+            printf '%s' "$wallpaper_b64" > seed/ddlc-wallpaper.b64
+            # Inject the image as a cloud-init write_files entry. The image is
+            # base64 data only inside the temporary seed and is removed later.
+            python3 - <<'PY'
+          from pathlib import Path
+          import base64
+          p = Path('seed/user-data')
+          s = p.read_text()
+          b64 = Path('seed/ddlc-wallpaper.b64').read_text().strip()
+          block = """\n  - path: /home/Winn_core/.ddlc-wallpaper.b64\n    owner: Winn_core:Winn_core\n    permissions: '0600'\n    encoding: b64\n    content: |\n""" + "\n".join("      " + b64[i:i+76] for i in range(0, len(b64), 76)) + "\n"
+          marker = "write_files:\n"
+          s = s.replace(marker, marker + block, 1)
+          p.write_text(s)
+          PY
+          fi
+
+          cat > seed/network-config <<'EOF'
+          version: 2
+          ethernets:
+            eth0:
+              dhcp4: true
+          EOF
+
+          cat > seed/meta-data <<EOF
+          instance-id: fedora-cloud-pc-${GITHUB_RUN_ID}
+          local-hostname: fedora-cloud-pc
+          EOF
+
+          genisoimage -output seed.iso -volid cidata -joliet -rock seed/user-data seed/meta-data seed/network-config
+          rm -f seed/ddlc-wallpaper.b64
+
+      - name: Boot Fedora VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GitHub-hosted runners normally do not expose nested KVM, so TCG is
+          # used for reliability. If /dev/kvm is available, use hardware accel.
+          if [[ -e /dev/kvm ]]; then
+            ACCEL="kvm:tcg"
+          else
+            ACCEL="tcg"
+          fi
+
+          nohup qemu-system-x86_64 \
+            -machine q35,accel="$ACCEL" \
+            -cpu max \
+            -smp 2 \
+            -m 5G \
+            -drive file=fedora-base.qcow2,if=virtio,format=qcow2 \
+            -drive file=seed.iso,media=cdrom,readonly=on \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
+            -device virtio-net-pci,netdev=net0 \
+            -display none \
+            -serial file:fedora-serial.log \
+            -monitor none \
+            >qemu.log 2>&1 &
+          echo $! > qemu.pid
+
+      - name: Wait for Fedora setup and print Tailscale IP
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 48); do
+            sleep 10
+            if grep -q "Fedora Cloud PC setup complete" fedora-serial.log 2>/dev/null; then
+              echo "Fedora setup completed."
+              break
+            fi
+            if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+              echo "::error::Fedora QEMU VM stopped."
+              cat qemu.log || true
+              cat fedora-serial.log || true
+              exit 1
+            fi
+          done
+          grep -E "Tailscale IPv4|Fedora Cloud PC setup complete" fedora-serial.log || true
+          if ! grep -q "Fedora Cloud PC setup complete" fedora-serial.log 2>/dev/null; then
+            echo "::error::Fedora setup did not finish in time."
+            tail -n 250 fedora-serial.log || true
+            exit 1
+          fi
+
+      - name: Print Cloud PC connection information
+        shell: bash
+        run: |
+          echo "=== Fedora Cloud PC v2 ==="
+          echo "Desktop : KDE Plasma"
+          echo "Remote  : xrdp"
+          echo "User    : ${RDP_USERNAME}"
+          echo "Wine    : installed"
+          echo "Winetricks: installed"
+          echo "Steam/Proton: attempted through RPM Fusion"
+          echo "Local RDP forwarding: 127.0.0.1:13389 -> Fedora:3389"
+          echo "Tailscale IPv4:"
+          grep -E "Tailscale IPv4" fedora-serial.log || true
+
+      - name: Maintain Fedora Cloud PC
+        shell: bash
+        run: |
+          set -euo pipefail
+          while true; do
+            if [[ -f STOP_WORKFLOW.txt ]]; then
+              echo "STOP_WORKFLOW.txt detected. Stopping."
+              break
+            fi
+            if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+              echo "::error::Fedora QEMU VM stopped unexpectedly."
+              exit 1
+            fi
+            sleep 60
+          done
+
+      - name: Save Fedora VM state
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [[ -f qemu.pid ]]; then
+            kill "$(cat qemu.pid)" 2>/dev/null || true
+            sleep 3
+          fi
+          mkdir -p backup
+          qemu-img convert -O qcow2 fedora-base.qcow2 backup/fedora-cloud-pc-v2.qcow2 2>/dev/null || true
+          cp fedora-serial.log backup/ 2>/dev/null || true
+          cp qemu.log backup/ 2>/dev/null || true
+
+      - name: Upload Fedora VM state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-cloud-pc-v2-${{ github.run_id }}
+          path: backup/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup temporary seed files
+        if: always()
+        shell: bash
+        run: |
+          rm -rf seed ddlc-extract ddlc-wallpaper.bin
