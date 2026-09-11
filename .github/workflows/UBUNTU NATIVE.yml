@@ -44,7 +44,7 @@ jobs:
           echo "Installing KDE Plasma, XRDP, Wine, Steam dependencies and utilities..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             plasma-desktop \
-            plasma-session-x11 \
+            kwin-x11 \
             kde-config-sddm \
             xrdp \
             xorgxrdp \
