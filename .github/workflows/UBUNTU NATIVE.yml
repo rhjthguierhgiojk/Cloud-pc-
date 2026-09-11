@@ -52,9 +52,6 @@ jobs:
             pipewire \
             pipewire-pulse \
             pipewire-module-xrdp \
-            mesa-vulkan-drivers \
-            mesa-utils \
-            vulkan-tools \
             dbus-x11 \
             curl \
             ca-certificates \
@@ -217,29 +214,6 @@ jobs:
           sudo ufw status verbose 2>/dev/null || true
 
       # Connection is available BEFORE any Wine/Steam work.
-      - name: Setup DXVK + Vulkan software rendering
-        shell: bash
-        run: |
-          set -e
-          echo "=== Vulkan devices ==="
-          vulkaninfo --summary 2>&1 || true
-
-          echo "=== OpenGL renderer ==="
-          glxinfo -B 2>&1 || true
-
-          # DXVK translates Direct3D 9/10/11 to Vulkan.
-          sudo apt-get update -qq
-          sudo apt-get install -y dxvk 2>/dev/null || true
-
-          echo "=== DXVK package ==="
-          dpkg -l | grep -E '^ii[[:space:]]+dxvk([[:space:]]|$)' || true
-
-          echo "=== Vulkan ICDs ==="
-          ls -la /usr/share/vulkan/icd.d/ 2>/dev/null || true
-
-          echo "=== CPU Vulkan (Lavapipe) check ==="
-          VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json             vulkaninfo --summary 2>&1 || true
-
       - name: Connection info
         shell: bash
         run: |
