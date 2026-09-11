@@ -33,32 +33,30 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils cloud-image-utils genisoimage \
-            curl p7zip-full
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils genisoimage curl p7zip-full
           qemu-system-x86_64 --version
           qemu-img --version
 
-             - name: Download & prepare Fedora disks (C: system + D: data)
-               shell: bash
-               run: |
-               set -euo pipefail
-               URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
-               SHA256="28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
+      - name: Download & prepare Fedora disks (C: system + D: data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+          SHA256="28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f"
 
-               echo "Downloading Fedora Cloud image (will become C: system disk)..."
-               curl -fL --retry 5 --retry-delay 5 -o fedora-system.qcow2 "$URL"
-               echo "$SHA256  fedora-system.qcow2" | sha256sum -c -
+          echo "Downloading Fedora Cloud image (will become C: system disk)..."
+          curl -fL --retry 5 --retry-delay 5 -o fedora-system.qcow2 "$URL"
+          echo "$SHA256  fedora-system.qcow2" | sha256sum -c -
 
-               # C: System disk (30 GB)
-               qemu-img resize fedora-system.qcow2 30G
-               echo "C: (system) disk ready:"
-               ls -lh fedora-system.qcow2
+          # C: System disk (30 GB)
+          qemu-img resize fedora-system.qcow2 30G
+          echo "C: (system) disk ready:"
+          ls -lh fedora-system.qcow2
 
-               # D: Data / Programs disk (30 GB)
-               qemu-img create -f qcow2 fedora-data.qcow2 30G
-               echo "D: (data/programs) disk ready:"
-               ls -lh fedora-data.qcow2
+          # D: Data / Programs disk (30 GB)
+          qemu-img create -f qcow2 fedora-data.qcow2 30G
+          echo "D: (data/programs) disk ready:"
+          ls -lh fedora-data.qcow2
 
       - name: Prepare optional DDLC wallpaper
         shell: bash
@@ -353,32 +351,32 @@ jobs:
             seed/user-data seed/meta-data seed/network-config
           echo "Seed ISO created ($(du -h seed.iso | cut -f1))"
 
-          - name: Boot Fedora VM (C: + D: disks)
-            shell: bash
-            run: |
-            set -euo pipefail
-            if [[ -e /dev/kvm ]]; then
-             ACCEL="kvm"
-             echo "Using KVM acceleration"
-           else
-             ACCEL="tcg"
-             echo "KVM not available - falling back to TCG (will be slow)"
-           fi
+      - name: Boot Fedora VM (C: + D: disks)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /dev/kvm ]]; then
+            ACCEL="kvm"
+            echo "Using KVM acceleration"
+          else
+            ACCEL="tcg"
+            echo "KVM not available - falling back to TCG (will be slow)"
+          fi
 
-           nohup qemu-system-x86_64 \
-             -machine q35,accel=${ACCEL} \
-             -cpu max \
-             -smp 2 \
-             -m 5G \
-             -drive file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback \
-             -drive file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback \
-             -drive file=seed.iso,media=cdrom,readonly=on \
-             -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
-             -device virtio-net-pci,netdev=net0 \
-             -display none \
-             -serial file:fedora-serial.log \
-             -monitor none \
-             > qemu.log 2>&1 &
+          nohup qemu-system-x86_64 \
+            -machine q35,accel=${ACCEL} \
+            -cpu max \
+            -smp 2 \
+            -m 5G \
+            -drive file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback \
+            -drive file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback \
+            -drive file=seed.iso,media=cdrom,readonly=on \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
+            -device virtio-net-pci,netdev=net0 \
+            -display none \
+            -serial file:fedora-serial.log \
+            -monitor none \
+            > qemu.log 2>&1 &
           echo $! > qemu.pid
           echo "QEMU started (PID $(cat qemu.pid))"
 
