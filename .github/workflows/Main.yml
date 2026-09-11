@@ -1,4 +1,4 @@
-name: RDP with persistence
+name: WINDOWS 11 GITHUB RUNNER
 
 on:
   workflow_dispatch:
