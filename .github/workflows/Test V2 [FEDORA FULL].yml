@@ -34,13 +34,13 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-          qemu-system-x86 qemu-utils cloud-image-utils genisoimage \
-          curl p7zip-full
+            qemu-system-x86 qemu-utils cloud-image-utils genisoimage \
+            curl p7zip-full
           qemu-system-x86_64 --version
           qemu-img --version
 
-          - name: "Download & prepare Fedora disks (C: system + D: data)"
-          shell: bash
+      - name: "Download & prepare Fedora disks (C: system + D: data)"
+        shell: bash
         run: |
           set -euo pipefail
           URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
@@ -69,17 +69,17 @@ jobs:
 
           theme=".github/workflows/ddlc theme v1.deskthemepack"
           if [[ -f "$theme" ]]; then
-          echo "Found DDLC theme package"
-          7z x -y "$theme" -oddlc-extract >/dev/null || true
-          wallpaper=$(find ddlc-extract -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | head -n1 || true)
-          if [[ -n "$wallpaper" ]]; then
-          cp "$wallpaper" ddlc-wallpaper.bin
-          echo "Using wallpaper: $wallpaper"
+            echo "Found DDLC theme package"
+            7z x -y "$theme" -oddlc-extract >/dev/null || true
+            wallpaper=$(find ddlc-extract -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) | head -n1 || true)
+            if [[ -n "$wallpaper" ]]; then
+              cp "$wallpaper" ddlc-wallpaper.bin
+              echo "Using wallpaper: $wallpaper"
+            else
+              echo "No image found inside theme package"
+            fi
           else
-          echo "No image found inside theme package"
-          fi
-          else
-          echo "No DDLC theme package present - skipping"
+            echo "No DDLC theme package present - skipping"
           fi
 
       - name: Create cloud-init seed
@@ -96,7 +96,7 @@ jobs:
 
           wallpaper_b64=""
           if [[ -f ddlc-wallpaper.bin ]]; then
-          wallpaper_b64=$(base64 -w0 ddlc-wallpaper.bin)
+            wallpaper_b64=$(base64 -w0 ddlc-wallpaper.bin)
           fi
 
           cat > seed/user-data <<'CLOUDINIT'
@@ -106,200 +106,200 @@ jobs:
           package_upgrade: true
 
           users:
-          - name: Winn_core
-          gecos: Fedora Cloud PC
-          groups: [wheel]
-          shell: /bin/bash
-          sudo: ALL=(ALL) NOPASSWD:ALL
-          lock_passwd: false
-          plain_text_passwd: __RDP_PASSWORD__
+            - name: Winn_core
+              gecos: Fedora Cloud PC
+              groups: [wheel]
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+              plain_text_passwd: __RDP_PASSWORD__
 
           chpasswd:
-          expire: false
+            expire: false
 
           packages:
-          - plasma-desktop
-          - plasma-workspace-x11
-          - kde-settings
-          - xrdp
-          - xorgxrdp
-          - dbus-x11
-          - NetworkManager
-          - curl
-          - wget
-          - git
-          - unzip
-          - tar
-          - p7zip
-          - firewalld
-          - pipewire
-          - pipewire-pulseaudio
-          - wireplumber
-          - wine
-          - wine-ntsync
-          - winetricks
-          - cabextract
-          - fuse
-          - fuse-libs
-          - mesa-dri-drivers
-          - mesa-vulkan-drivers
+            - plasma-desktop
+            - plasma-workspace-x11
+            - kde-settings
+            - xrdp
+            - xorgxrdp
+            - dbus-x11
+            - NetworkManager
+            - curl
+            - wget
+            - git
+            - unzip
+            - tar
+            - p7zip
+            - firewalld
+            - pipewire
+            - pipewire-pulseaudio
+            - wireplumber
+            - wine
+            - wine-ntsync
+            - winetricks
+            - cabextract
+            - fuse
+            - fuse-libs
+            - mesa-dri-drivers
+            - mesa-vulkan-drivers
 
           write_files:
-          - path: /etc/xrdp/startwm.sh
-          permissions: '0755'
-          content: |
-          #!/bin/sh
-          export LANG=en_US.UTF-8
-          export LC_ALL=en_US.UTF-8
-          export XDG_CURRENT_DESKTOP=KDE
-          export XDG_SESSION_DESKTOP=KDE
-          export DESKTOP_SESSION=plasma
-          export KDE_SESSION_VERSION=6
-          unset DBUS_SESSION_BUS_ADDRESS
-          exec dbus-run-session -- startplasma-x11
+            - path: /etc/xrdp/startwm.sh
+              permissions: '0755'
+              content: |
+                #!/bin/sh
+                export LANG=en_US.UTF-8
+                export LC_ALL=en_US.UTF-8
+                export XDG_CURRENT_DESKTOP=KDE
+                export XDG_SESSION_DESKTOP=KDE
+                export DESKTOP_SESSION=plasma
+                export KDE_SESSION_VERSION=6
+                unset DBUS_SESSION_BUS_ADDRESS
+                exec dbus-run-session -- startplasma-x11
 
-          - path: /etc/tailscale-auth-key
-          permissions: '0600'
-          content: |
-          __TAILSCALE_AUTH_KEY__
+            - path: /etc/tailscale-auth-key
+              permissions: '0600'
+              content: |
+                __TAILSCALE_AUTH_KEY__
 
-          - path: /usr/local/sbin/fedora-cloud-finalize.sh
-          permissions: '0755'
-          content: |
-          #!/bin/bash
-          set -euo pipefail
-          exec > >(tee -a /var/log/fedora-cloud-finalize.log) 2>&1
-          echo "=== Fedora Cloud PC finalize started at $(date) ==="
+            - path: /usr/local/sbin/fedora-cloud-finalize.sh
+              permissions: '0755'
+              content: |
+                #!/bin/bash
+                set -euo pipefail
+                exec > >(tee -a /var/log/fedora-cloud-finalize.log) 2>&1
+                echo "=== Fedora Cloud PC finalize started at $(date) ==="
 
-          systemctl enable --now NetworkManager
-          systemctl enable --now firewalld
-          systemctl enable --now xrdp
+                systemctl enable --now NetworkManager
+                systemctl enable --now firewalld
+                systemctl enable --now xrdp
 
-          firewall-cmd --permanent --add-service=ssh || true
-          firewall-cmd --permanent --add-port=3389/tcp || true
-          firewall-cmd --reload || true
+                firewall-cmd --permanent --add-service=ssh || true
+                firewall-cmd --permanent --add-port=3389/tcp || true
+                firewall-cmd --reload || true
 
-          # ---------- Prepare D: data disk ----------
-          DATA_DISK=""
-          for d in /dev/vdb /dev/sdb /dev/nvme1n1; do
-          if [[ -b "$d" ]]; then
-          DATA_DISK="$d"
-          break
-          fi
-          done
+                # ---------- Prepare D: data disk ----------
+                DATA_DISK=""
+                for d in /dev/vdb /dev/sdb /dev/nvme1n1; do
+                  if [[ -b "$d" ]]; then
+                    DATA_DISK="$d"
+                    break
+                  fi
+                done
 
-          if [[ -n "$DATA_DISK" ]]; then
-          echo "Found data disk: $DATA_DISK"
-          if ! lsblk -no PARTTYPE ${DATA_DISK}1 &>/dev/null; then
-          echo "Partitioning $DATA_DISK ..."
-          parted -s "$DATA_DISK" mklabel gpt
-          parted -s "$DATA_DISK" mkpart primary ext4 1MiB 100%
-          sleep 2
-          partprobe "$DATA_DISK" || true
-          fi
+                if [[ -n "$DATA_DISK" ]]; then
+                  echo "Found data disk: $DATA_DISK"
+                  if ! lsblk -no PARTTYPE ${DATA_DISK}1 &>/dev/null; then
+                    echo "Partitioning $DATA_DISK ..."
+                    parted -s "$DATA_DISK" mklabel gpt
+                    parted -s "$DATA_DISK" mkpart primary ext4 1MiB 100%
+                    sleep 2
+                    partprobe "$DATA_DISK" || true
+                  fi
 
-          PART="${DATA_DISK}1"
-          if ! blkid -o value -s TYPE "$PART" &>/dev/null; then
-          echo "Formatting $PART as ext4 ..."
-          mkfs.ext4 -F -L "D_DRIVE" "$PART"
-          fi
+                  PART="${DATA_DISK}1"
+                  if ! blkid -o value -s TYPE "$PART" &>/dev/null; then
+                    echo "Formatting $PART as ext4 ..."
+                    mkfs.ext4 -F -L "D_DRIVE" "$PART"
+                  fi
 
-          mkdir -p /mnt/D
-          mount "$PART" /mnt/D || true
+                  mkdir -p /mnt/D
+                  mount "$PART" /mnt/D || true
 
-          UUID=$(blkid -o value -s UUID "$PART")
-          if ! grep -q "$UUID" /etc/fstab; then
-          echo "UUID=$UUID  /mnt/D  ext4  defaults,nofail  0  2" >> /etc/fstab
-          fi
+                  UUID=$(blkid -o value -s UUID "$PART")
+                  if ! grep -q "$UUID" /etc/fstab; then
+                    echo "UUID=$UUID  /mnt/D  ext4  defaults,nofail  0  2" >> /etc/fstab
+                  fi
 
-          chown -R Winn_core:Winn_core /mnt/D
-          mkdir -p /mnt/D/Programs /mnt/D/Wine /mnt/D/Steam /mnt/D/Downloads
-          chown -R Winn_core:Winn_core /mnt/D
+                  chown -R Winn_core:Winn_core /mnt/D
+                  mkdir -p /mnt/D/Programs /mnt/D/Wine /mnt/D/Steam /mnt/D/Downloads
+                  chown -R Winn_core:Winn_core /mnt/D
 
-          ln -sfn /mnt/D /home/Winn_core/D
-          chown -h Winn_core:Winn_core /home/Winn_core/D
+                  ln -sfn /mnt/D /home/Winn_core/D
+                  chown -h Winn_core:Winn_core /home/Winn_core/D
 
-          echo "D: drive ready at /mnt/D (and \~/D)"
-          else
-          echo "WARNING: No second disk found - continuing without D: drive"
-          fi
+                  echo "D: drive ready at /mnt/D (and \~/D)"
+                else
+                  echo "WARNING: No second disk found - continuing without D: drive"
+                fi
 
-          # Wine / NTSYNC
-          dnf -y install wine wine-ntsync winetricks cabextract || true
+                # Wine / NTSYNC
+                dnf -y install wine wine-ntsync winetricks cabextract || true
 
-          # RPM Fusion + Steam
-          dnf -y install \
-          https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
-          https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm || true
-          dnf -y makecache || true
-          dnf -y install steam || true
+                # RPM Fusion + Steam
+                dnf -y install \
+                  https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+                  https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm || true
+                dnf -y makecache || true
+                dnf -y install steam || true
 
-          # Wine prefix on D: if available
-          if [[ -d /mnt/D ]]; then
-          install -d -o Winn_core -g Winn_core /mnt/D/Wine
-          runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine wineboot -u || true
-          runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine winetricks -q corefonts || true
-          ln -sfn /mnt/D/Wine /home/Winn_core/.wine
-          chown -h Winn_core:Winn_core /home/Winn_core/.wine
-          else
-          install -d -o Winn_core -g Winn_core /home/Winn_core/.wine
-          runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine wineboot -u || true
-          runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine winetricks -q corefonts || true
-          fi
+                # Wine prefix on D: if available
+                if [[ -d /mnt/D ]]; then
+                  install -d -o Winn_core -g Winn_core /mnt/D/Wine
+                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine wineboot -u || true
+                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine winetricks -q corefonts || true
+                  ln -sfn /mnt/D/Wine /home/Winn_core/.wine
+                  chown -h Winn_core:Winn_core /home/Winn_core/.wine
+                else
+                  install -d -o Winn_core -g Winn_core /home/Winn_core/.wine
+                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine wineboot -u || true
+                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine winetricks -q corefonts || true
+                fi
 
-          # KDE defaults
-          runuser -u Winn_core -- dbus-run-session kwriteconfig6 --file kdeglobals --group KDE --key SingleClick false || true
-          runuser -u Winn_core -- dbus-run-session kwriteconfig6 --file kwinrc --group Compositing --key Enabled true || true
+                # KDE defaults
+                runuser -u Winn_core -- dbus-run-session kwriteconfig6 --file kdeglobals --group KDE --key SingleClick false || true
+                runuser -u Winn_core -- dbus-run-session kwriteconfig6 --file kwinrc --group Compositing --key Enabled true || true
 
-          # Optional DDLC wallpaper
-          if [[ -s /home/Winn_core/.ddlc-wallpaper.b64 ]]; then
-          base64 -d /home/Winn_core/.ddlc-wallpaper.b64 > /home/Winn_core/.ddlc-wallpaper
-          chown Winn_core:Winn_core /home/Winn_core/.ddlc-wallpaper
-          chmod 0644 /home/Winn_core/.ddlc-wallpaper
-          echo "DDLC wallpaper installed"
-          fi
+                # Optional DDLC wallpaper
+                if [[ -s /home/Winn_core/.ddlc-wallpaper.b64 ]]; then
+                  base64 -d /home/Winn_core/.ddlc-wallpaper.b64 > /home/Winn_core/.ddlc-wallpaper
+                  chown Winn_core:Winn_core /home/Winn_core/.ddlc-wallpaper
+                  chmod 0644 /home/Winn_core/.ddlc-wallpaper
+                  echo "DDLC wallpaper installed"
+                fi
 
-          # Tailscale
-          if ! command -v tailscale >/dev/null 2>&1; then
-          curl -fsSL https://tailscale.com/install.sh | sh
-          fi
-          systemctl enable --now tailscaled
-          TS_KEY=$(cat /etc/tailscale-auth-key)
-          tailscale up --auth-key="${TS_KEY}" --hostname="fedora-gh-__GITHUB_RUN_ID__" --accept-dns=false
-          rm -f /etc/tailscale-auth-key
+                # Tailscale
+                if ! command -v tailscale >/dev/null 2>&1; then
+                  curl -fsSL https://tailscale.com/install.sh | sh
+                fi
+                systemctl enable --now tailscaled
+                TS_KEY=$(cat /etc/tailscale-auth-key)
+                tailscale up --auth-key="${TS_KEY}" --hostname="fedora-gh-__GITHUB_RUN_ID__" --accept-dns=false
+                rm -f /etc/tailscale-auth-key
 
-          TS_IP=$(tailscale ip -4 | head -n1 || true)
-          echo "Tailscale IPv4: ${TS_IP}" | tee /home/Winn_core/TAILSCALE_IP.txt
-          chown Winn_core:Winn_core /home/Winn_core/TAILSCALE_IP.txt
+                TS_IP=$(tailscale ip -4 | head -n1 || true)
+                echo "Tailscale IPv4: ${TS_IP}" | tee /home/Winn_core/TAILSCALE_IP.txt
+                chown Winn_core:Winn_core /home/Winn_core/TAILSCALE_IP.txt
 
-          loginctl enable-linger Winn_core || true
-          systemctl restart xrdp || true
+                loginctl enable-linger Winn_core || true
+                systemctl restart xrdp || true
 
-          echo "Fedora Cloud PC setup complete."
-          echo "Tailscale IPv4: ${TS_IP}"
-          echo "=== Finalize finished at $(date) ==="
+                echo "Fedora Cloud PC setup complete."
+                echo "Tailscale IPv4: ${TS_IP}"
+                echo "=== Finalize finished at $(date) ==="
 
-          - path: /etc/systemd/system/fedora-cloud-setup.service
-          permissions: '0644'
-          content: |
-          [Unit]
-          Description=Fedora Cloud PC final setup
-          After=network-online.target
-          Wants=network-online.target
+            - path: /etc/systemd/system/fedora-cloud-setup.service
+              permissions: '0644'
+              content: |
+                [Unit]
+                Description=Fedora Cloud PC final setup
+                After=network-online.target
+                Wants=network-online.target
 
-          [Service]
-          Type=oneshot
-          RemainAfterExit=yes
-          ExecStart=/usr/local/sbin/fedora-cloud-finalize.sh
+                [Service]
+                Type=oneshot
+                RemainAfterExit=yes
+                ExecStart=/usr/local/sbin/fedora-cloud-finalize.sh
 
-          [Install]
-          WantedBy=multi-user.target
+                [Install]
+                WantedBy=multi-user.target
 
           runcmd:
-          - systemctl daemon-reload
-          - systemctl enable --now fedora-cloud-setup.service
-          - touch /home/Winn_core/FEDORA_CLOUD_PC_READY
-          - chown Winn_core:Winn_core /home/Winn_core/FEDORA_CLOUD_PC_READY
+            - systemctl daemon-reload
+            - systemctl enable --now fedora-cloud-setup.service
+            - touch /home/Winn_core/FEDORA_CLOUD_PC_READY
+            - chown Winn_core:Winn_core /home/Winn_core/FEDORA_CLOUD_PC_READY
 
           final_message: "Fedora Cloud PC v2 initialization complete."
           CLOUDINIT
@@ -316,7 +316,7 @@ jobs:
           PY
 
           if [[ -n "$wallpaper_b64" ]]; then
-          python3 - <<'PY'
+            python3 - <<'PY'
           from pathlib import Path
           b64 = Path('ddlc-wallpaper.bin').read_bytes()
           import base64
@@ -324,14 +324,14 @@ jobs:
           p = Path('seed/user-data')
           s = p.read_text()
           block = (
-          "\n  - path: /home/Winn_core/.ddlc-wallpaper.b64\n"
-          "    owner: Winn_core:Winn_core\n"
-          "    permissions: '0600'\n"
-          "    encoding: b64\n"
-          "    content: |\n"
+              "\n  - path: /home/Winn_core/.ddlc-wallpaper.b64\n"
+              "    owner: Winn_core:Winn_core\n"
+              "    permissions: '0600'\n"
+              "    encoding: b64\n"
+              "    content: |\n"
           )
           for i in range(0, len(b64s), 76):
-          block += "      " + b64s[i:i+76] + "\n"
+              block += "      " + b64s[i:i+76] + "\n"
           s = s.replace("write_files:\n", "write_files:\n" + block, 1)
           p.write_text(s)
           PY
@@ -340,8 +340,8 @@ jobs:
           cat > seed/network-config <<'EOF'
           version: 2
           ethernets:
-          eth0:
-          dhcp4: true
+            eth0:
+              dhcp4: true
           EOF
 
           cat > seed/meta-data <<EOF
@@ -350,12 +350,12 @@ jobs:
           EOF
 
           genisoimage -output seed.iso -volid cidata -joliet -rock \
-          seed/user-data seed/meta-data seed/network-config
+            seed/user-data seed/meta-data seed/network-config
           echo "Seed ISO created ($(du -h seed.iso | cut -f1))"
 
-          - name: "Boot Fedora VM (C: + D: disks)"
-          shell: bash
-          run: |
+      - name: "Boot Fedora VM (C: + D: disks)"
+        shell: bash
+        run: |
           set -euo pipefail
           if [[ -e /dev/kvm ]]; then
           ACCEL="kvm"
@@ -366,19 +366,19 @@ jobs:
           fi
 
           nohup qemu-system-x86_64 \
-          -machine q35,accel=${ACCEL} \
-          -cpu max \
-          -smp 2 \
-          -m 5G \
-          -drive file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback \
-          -drive file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback \
-          -drive file=seed.iso,media=cdrom,readonly=on \
-          -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
-          -device virtio-net-pci,netdev=net0 \
-          -display none \
-          -serial file:fedora-serial.log \
-          -monitor none \
-          > qemu.log 2>&1 &
+            -machine q35,accel=${ACCEL} \
+            -cpu max \
+            -smp 2 \
+            -m 5G \
+            -drive file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback \
+            -drive file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback \
+            -drive file=seed.iso,media=cdrom,readonly=on \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
+            -device virtio-net-pci,netdev=net0 \
+            -display none \
+            -serial file:fedora-serial.log \
+            -monitor none \
+            > qemu.log 2>&1 &
           echo $! > qemu.pid
           echo "QEMU started (PID $(cat qemu.pid))"
 
@@ -389,35 +389,35 @@ jobs:
           echo "Waiting for cloud-init + finalize script (TCG is slow, this can take 15-25 min)..."
 
           for i in $(seq 1 180); do
-          sleep 10
+            sleep 10
 
-          if grep -q "Fedora Cloud PC setup complete" fedora-serial.log 2>/dev/null; then
-          echo "Setup completed successfully!"
-          break
-          fi
+            if grep -q "Fedora Cloud PC setup complete" fedora-serial.log 2>/dev/null; then
+              echo "Setup completed successfully!"
+              break
+            fi
 
-          if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
-          echo "::error::QEMU process died"
-          echo "----- qemu.log -----"
-          cat qemu.log || true
-          echo "----- serial log (last 100 lines) -----"
-          tail -n 100 fedora-serial.log || true
-          exit 1
-          fi
+            if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+              echo "::error::QEMU process died"
+              echo "----- qemu.log -----"
+              cat qemu.log || true
+              echo "----- serial log (last 100 lines) -----"
+              tail -n 100 fedora-serial.log || true
+              exit 1
+            fi
 
-          if (( i % 6 == 0 )); then
-          echo "Still waiting... ($((i*10))s elapsed)"
-          echo "----- last 8 lines of serial log -----"
-          tail -n 8 fedora-serial.log || true
-          echo "-------------------------------------"
-          fi
+            if (( i % 6 == 0 )); then
+              echo "Still waiting... ($((i*10))s elapsed)"
+              echo "----- last 8 lines of serial log -----"
+              tail -n 8 fedora-serial.log || true
+              echo "-------------------------------------"
+            fi
           done
 
           if ! grep -q "Fedora Cloud PC setup complete" fedora-serial.log 2>/dev/null; then
-          echo "::error::Setup did not finish in time (waited 30 minutes)"
-          echo "----- Full serial log (last 400 lines) -----"
-          tail -n 400 fedora-serial.log || true
-          exit 1
+            echo "::error::Setup did not finish in time (waited 30 minutes)"
+            echo "----- Full serial log (last 400 lines) -----"
+            tail -n 400 fedora-serial.log || true
+            exit 1
           fi
 
           echo "----- Tailscale info -----"
@@ -454,20 +454,20 @@ jobs:
           echo "Keeping VM alive for up to ${MAX_HOURS} hour(s). Create STOP_WORKFLOW.txt to stop early."
 
           while true; do
-          if [[ -f STOP_WORKFLOW.txt ]]; then
-          echo "STOP_WORKFLOW.txt detected - shutting down"
-          break
-          fi
-          if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
-          echo "::error::QEMU died unexpectedly"
-          exit 1
-          fi
-          NOW=$(date +%s)
-          if (( NOW - START > MAX_SECONDS )); then
-          echo "Max runtime (${MAX_HOURS}h) reached - stopping"
-          break
-          fi
-          sleep 60
+            if [[ -f STOP_WORKFLOW.txt ]]; then
+              echo "STOP_WORKFLOW.txt detected - shutting down"
+              break
+            fi
+            if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+              echo "::error::QEMU died unexpectedly"
+              exit 1
+            fi
+            NOW=$(date +%s)
+            if (( NOW - START > MAX_SECONDS )); then
+              echo "Max runtime (${MAX_HOURS}h) reached - stopping"
+              break
+            fi
+            sleep 60
           done
 
       - name: Save VM state
@@ -476,8 +476,8 @@ jobs:
         run: |
           set +e
           if [[ -f qemu.pid ]]; then
-          kill "$(cat qemu.pid)" 2>/dev/null || true
-          sleep 4
+            kill "$(cat qemu.pid)" 2>/dev/null || true
+            sleep 4
           fi
           mkdir -p backup
           qemu-img convert -O qcow2 fedora-system.qcow2 backup/fedora-system.qcow2 2>/dev/null || true
