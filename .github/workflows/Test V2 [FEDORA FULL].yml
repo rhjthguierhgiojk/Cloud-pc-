@@ -103,7 +103,7 @@ jobs:
           #cloud-config
           hostname: fedora-cloud-pc
           package_update: true
-          package_upgrade: true
+          package_upgrade: false
 
           users:
             - name: Winn_core
@@ -168,7 +168,11 @@ jobs:
               content: |
                 #!/bin/bash
                 set -euo pipefail
-                exec > >(tee -a /var/log/fedora-cloud-finalize.log) 2>&1
+                if [[ -e /dev/ttyS0 ]]; then
+                  exec > >(tee -a /var/log/fedora-cloud-finalize.log /dev/ttyS0) 2>&1
+                else
+                  exec > >(tee -a /var/log/fedora-cloud-finalize.log) 2>&1
+                fi
                 echo "=== Fedora Cloud PC finalize started at $(date) ==="
 
                 systemctl enable --now NetworkManager
@@ -237,14 +241,14 @@ jobs:
                 # Wine prefix on D: if available
                 if [[ -d /mnt/D ]]; then
                   install -d -o Winn_core -g Winn_core /mnt/D/Wine
-                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine wineboot -u || true
-                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine winetricks -q corefonts || true
+                  timeout 120s runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine wineboot -u || true
+                  timeout 180s runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/mnt/D/Wine winetricks -q corefonts || true
                   ln -sfn /mnt/D/Wine /home/Winn_core/.wine
                   chown -h Winn_core:Winn_core /home/Winn_core/.wine
                 else
                   install -d -o Winn_core -g Winn_core /home/Winn_core/.wine
-                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine wineboot -u || true
-                  runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine winetricks -q corefonts || true
+                  timeout 120s runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine wineboot -u || true
+                  timeout 180s runuser -u Winn_core -- env HOME=/home/Winn_core WINEPREFIX=/home/Winn_core/.wine winetricks -q corefonts || true
                 fi
 
                 # KDE defaults
@@ -261,12 +265,32 @@ jobs:
 
                 # Tailscale
                 if ! command -v tailscale >/dev/null 2>&1; then
-                  curl -fsSL https://tailscale.com/install.sh | sh
+                  echo "Installing Tailscale..."
+                  if ! timeout 180s bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'; then
+                    echo "ERROR: Tailscale installation timed out or failed"
+                    exit 1
+                  fi
                 fi
-                systemctl enable --now tailscaled
+
+                timeout 60s systemctl enable --now tailscaled
                 TS_KEY=$(cat /etc/tailscale-auth-key)
-                tailscale up --auth-key="${TS_KEY}" --hostname="fedora-gh-__GITHUB_RUN_ID__" --accept-dns=false
+                TS_UP_OK=false
+                for attempt in 1 2 3; do
+                  echo "Tailscale authentication attempt ${attempt}/3..."
+                  if timeout 90s tailscale up --auth-key="${TS_KEY}" --hostname="fedora-gh-__GITHUB_RUN_ID__" --accept-dns=false --timeout=75s; then
+                    TS_UP_OK=true
+                    break
+                  fi
+                  echo "Tailscale attempt ${attempt} failed; retrying in 5s..."
+                  sleep 5
+                done
                 rm -f /etc/tailscale-auth-key
+                if [[ "${TS_UP_OK}" != true ]]; then
+                  echo "ERROR: Tailscale did not become ready after 3 attempts"
+                  tailscale status || true
+                  systemctl status tailscaled --no-pager || true
+                  exit 1
+                fi
 
                 TS_IP=$(tailscale ip -4 | head -n1 || true)
                 echo "Tailscale IPv4: ${TS_IP}" | tee /home/Winn_core/TAILSCALE_IP.txt
@@ -297,7 +321,8 @@ jobs:
 
           runcmd:
             - systemctl daemon-reload
-            - systemctl enable --now fedora-cloud-setup.service
+            - systemctl enable fedora-cloud-setup.service
+            - systemctl start --no-block fedora-cloud-setup.service
             - touch /home/Winn_core/FEDORA_CLOUD_PC_READY
             - chown Winn_core:Winn_core /home/Winn_core/FEDORA_CLOUD_PC_READY
 
@@ -367,6 +392,7 @@ jobs:
             -drive "file=seed.iso,media=cdrom,readonly=on"
             -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389"
             -device "virtio-net-pci,netdev=net0"
+            -device "virtio-rng-pci"
             -display none
             -serial "file:fedora-serial.log"
             -monitor none
@@ -436,6 +462,14 @@ jobs:
               break
             fi
 
+            # The marker is created by cloud-init as soon as the finalizer is launched.
+            # Use it only as a diagnostic; the serial completion line remains the success gate.
+            if (( i % 12 == 0 )); then
+              echo "----- cloud-init/finalizer diagnostics -----"
+              tail -n 40 /var/log/fedora-cloud-finalize.log 2>/dev/null || true
+              echo "--------------------------------------------"
+            fi
+
             if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
               echo "::error::QEMU process died"
               echo "----- qemu.log -----"
@@ -455,6 +489,7 @@ jobs:
 
           if ! grep -q "Fedora Cloud PC setup complete" fedora-serial.log 2>/dev/null; then
             echo "::error::Setup did not finish in time (waited 30 minutes)"
+            echo "::error::The finalizer log is printed below; look for the last completed section."
             echo "----- Full serial log (last 400 lines) -----"
             tail -n 400 fedora-serial.log || true
             exit 1
