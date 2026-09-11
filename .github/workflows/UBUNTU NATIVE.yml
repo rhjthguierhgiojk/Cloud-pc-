@@ -266,6 +266,49 @@ jobs:
           printf '%s\n' "${TS_IP}" | sudo tee "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" >/dev/null
           sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" "/home/${RDP_USERNAME}/TAILSCALE_IP.txt"
 
+      - name: Diagnose XRDP and network
+        shell: bash
+        run: |
+          set +e
+
+          echo "========================================"
+          echo "  XRDP / NETWORK DIAGNOSTICS"
+          echo "========================================"
+          echo ""
+          echo "===== XRDP SERVICE ====="
+          sudo systemctl status xrdp --no-pager || true
+          echo ""
+          echo "===== XRDP LISTENING PORT ====="
+          sudo ss -lntp | grep ':3389' || echo "ERROR: Nothing is listening on TCP 3389"
+          echo ""
+          echo "===== XRDP PROCESS ====="
+          pgrep -a xrdp || echo "ERROR: xrdp process not found"
+          echo ""
+          echo "===== XRDP RECENT LOG ====="
+          sudo journalctl -u xrdp --no-pager -n 60 || true
+          echo ""
+          echo "===== LOCAL TCP TEST ====="
+          if timeout 5 bash -c '</dev/tcp/127.0.0.1/3389' 2>/dev/null; then
+            echo "OK: TCP 3389 is reachable locally"
+          else
+            echo "ERROR: TCP 3389 is NOT reachable locally"
+          fi
+          echo ""
+          echo "===== TAILSCALE STATUS ====="
+          sudo tailscale status || true
+          echo ""
+          echo "===== TAILSCALE IP ====="
+          sudo tailscale ip -4 || true
+          echo ""
+          echo "===== FIREWALL ====="
+          sudo ufw status verbose 2>/dev/null || true
+          sudo firewall-cmd --state 2>/dev/null || true
+          sudo firewall-cmd --list-ports 2>/dev/null || true
+          echo ""
+          echo "========================================"
+          echo "  END DIAGNOSTICS"
+          echo "========================================"
+
       - name: Connection info
         shell: bash
         run: |
