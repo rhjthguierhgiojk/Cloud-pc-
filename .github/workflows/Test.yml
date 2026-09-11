@@ -1,0 +1,11 @@
+name: Fedora Runner V2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Test
+        run: echo "Workflow is working"
