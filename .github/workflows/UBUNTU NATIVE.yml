@@ -1,4 +1,4 @@
-name: Ubuntu Cloud PC V4 - FAST BOOT
+name: Ubuntu Cloud PC V5 - UBUNTU DESKTOP
 
 on:
   workflow_dispatch:
@@ -28,9 +28,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # FAST PATH: only install what is needed to get a usable KDE/XRDP
+      # FAST PATH: only install what is needed to get a usable Ubuntu Desktop/XRDP
       # desktop online. Wine/Steam are intentionally NOT installed here.
-      - name: Fast install KDE + XRDP
+      - name: Fast install Ubuntu Desktop + XRDP
         shell: bash
         run: |
           set -euo pipefail
@@ -43,10 +43,9 @@ jobs:
           echo "Updating package indexes..."
           sudo apt-get update
 
-          echo "Installing minimal KDE/X11 + XRDP stack..."
+          echo "Installing Ubuntu Desktop GNOME/Xorg + XRDP stack..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            plasma-desktop \
-            kwin-x11 \
+            ubuntu-desktop-minimal \
             xrdp \
             xorgxrdp \
             pipewire \
@@ -83,17 +82,18 @@ jobs:
 
           sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}"
 
-          # XRDP -> KDE Plasma X11
+          # XRDP -> Ubuntu Desktop GNOME on Xorg
           sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
           #!/bin/sh
           export LANG=en_US.UTF-8
           export LC_ALL=en_US.UTF-8
-          export XDG_CURRENT_DESKTOP=KDE
-          export XDG_SESSION_DESKTOP=KDE
-          export DESKTOP_SESSION=plasma
-          export KDE_SESSION_VERSION=6
+          export XDG_CURRENT_DESKTOP=GNOME
+          export XDG_SESSION_DESKTOP=ubuntu
+          export DESKTOP_SESSION=ubuntu
+          export GNOME_SHELL_SESSION_MODE=ubuntu
+          export XDG_SESSION_TYPE=x11
           unset DBUS_SESSION_BUS_ADDRESS
-          exec dbus-run-session -- startplasma-x11
+          exec dbus-run-session -- gnome-session --session=ubuntu
           EOF
           sudo chmod 0755 /etc/xrdp/startwm.sh
 
@@ -111,24 +111,8 @@ jobs:
 
           sudo systemctl restart xrdp
 
-          echo "Fast KDE/XRDP setup complete."
+          echo "Fast Ubuntu Desktop/XRDP setup complete."
 
-      - name: Configure KDE session
-        shell: bash
-        run: |
-          set -euo pipefail
-          USER_HOME="/home/${RDP_USERNAME}"
-
-          sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config"
-
-          sudo -u "${RDP_USERNAME}" \
-            dbus-run-session kwriteconfig6 \
-              --file "${USER_HOME}/.config/kdeglobals" \
-              --group KDE --key SingleClick false || true
-
-          sudo systemctl restart xrdp
-
-          echo "KDE session configured."
 
       - name: Configure Tailscale
         shell: bash
@@ -214,6 +198,25 @@ jobs:
           sudo ufw status verbose 2>/dev/null || true
 
       # Connection is available BEFORE any Wine/Steam work.
+      - name: Tune Ubuntu desktop for XRDP
+        shell: bash
+        run: |
+          set -e
+          USER_HOME="/home/${RDP_USERNAME}"
+
+          # Keep GNOME on Xorg for XRDP instead of Wayland.
+          sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config"
+
+          # Disable common visual effects that waste CPU/framebuffer work.
+          sudo -u "${RDP_USERNAME}" dbus-run-session -- gsettings set org.gnome.desktop.interface enable-animations false || true
+          sudo -u "${RDP_USERNAME}" dbus-run-session -- gsettings set org.gnome.desktop.interface enable-hot-corners false || true
+
+          # Lower XRDP color depth to reduce framebuffer traffic/encoding work.
+          sudo sed -i '/^max_bpp=/d;/^xserverbpp=/d' /etc/xrdp/xrdp.ini
+          sudo sed -i '/^\[Globals\]/a max_bpp=16\nxserverbpp=16' /etc/xrdp/xrdp.ini
+
+          sudo systemctl restart xrdp
+
       - name: Connection info
         shell: bash
         run: |
@@ -223,7 +226,7 @@ jobs:
           echo "       UBUNTU CLOUD PC READY"
           echo "========================================"
           echo "OS        : Ubuntu 24.04"
-          echo "Desktop   : KDE Plasma (X11)"
+          echo "Desktop   : Ubuntu Desktop (GNOME on Xorg)"
           echo "Remote    : XRDP on port 3389"
           echo "Audio     : RDP audio redirection (PipeWire)"
           echo "User      : ${RDP_USERNAME}"
@@ -255,7 +258,7 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive dpkg --add-architecture i386
             sudo apt-get update
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-              wine winetricks cabextract mesa-vulkan-drivers mesa-utils || true
+              wine winetricks cabextract || true
 
             sudo install -d -o "${RDP_USERNAME}" -g "${RDP_USERNAME}" "$WINEPREFIX"
 
@@ -277,6 +280,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if ! [[ "${MAX_HOURS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::max-hours must be a positive whole number"
+            exit 1
+          fi
 
           MAX_SECONDS=$(( MAX_HOURS * 3600 ))
           START=$(date +%s)
