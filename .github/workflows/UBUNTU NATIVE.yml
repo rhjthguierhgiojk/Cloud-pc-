@@ -1,4 +1,4 @@
-name: Ubuntu Cloud PC V5 - UBUNTU DESKTOP
+name: Ubuntu Cloud PC V6 - FAST BOOT
 
 on:
   workflow_dispatch:
@@ -11,6 +11,13 @@ on:
         description: "Maximum hours to keep the Ubuntu desktop alive"
         required: false
         default: "4"
+      install-wine:
+        description: "Install Wine in background after RDP is up (true/false)"
+        required: false
+        default: "true"
+
+env:
+  RDP_USERNAME: Winn_core
 
 jobs:
   VM-GITHUB-UBUNTU_NATIVE:
@@ -19,70 +26,67 @@ jobs:
 
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-      RDP_USERNAME: Winn_core
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
       PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       MAX_HOURS: ${{ github.event.inputs['max-hours'] || '4' }}
+      INSTALL_WINE: ${{ github.event.inputs['install-wine'] || 'true' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # FAST PATH: only install what is needed to get a usable Ubuntu Desktop/XRDP
-      # desktop online. Wine/Steam are intentionally NOT installed here.
+      # ==================================================================
+      # PHASE 1 — FAST PATH: get Ubuntu Desktop + XRDP + Tailscale online
+      # as fast as possible. No recommends, no snaps, no extras.
+      # ==================================================================
       - name: Fast install Ubuntu Desktop + XRDP
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -z "${RDP_PASSWORD:-}" ]]; then
-            echo "::error::RDP_PASSWORD secret is missing"
-            exit 1
-          fi
+          [[ -n "${RDP_PASSWORD:-}" ]] || { echo "::error::RDP_PASSWORD secret missing"; exit 1; }
 
-          echo "Updating package indexes..."
-          sudo apt-get update
+          # Speed: no recommends, parallel downloads, keep it lean.
+          sudo tee /etc/apt/apt.conf.d/99-lean >/dev/null <<'EOF'
+          APT::Install-Recommends "false";
+          APT::Install-Suggests "false";
+          Acquire::Queue-Mode "host";
+          Acquire::Retries "3";
+          Dir::Cache::Archives "/var/cache/apt/archives";
+          EOF
 
-          echo "Installing Ubuntu Desktop GNOME/Xorg + XRDP stack..."
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          echo "::group::apt install desktop+xrdp"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             ubuntu-desktop-minimal \
             xrdp \
             xorgxrdp \
             pipewire \
             pipewire-pulse \
             pipewire-module-xrdp \
+            wireplumber \
             dbus-x11 \
-            curl \
-            ca-certificates \
-            wget \
-            unzip \
-            tar \
-            p7zip-full
+            curl ca-certificates wget unzip tar p7zip-full
+          echo "::endgroup::"
 
-          if id "${RDP_USERNAME}" >/dev/null 2>&1; then
-            echo "User ${RDP_USERNAME} already exists."
-          else
-            sudo useradd -m -s /bin/bash "${RDP_USERNAME}"
-          fi
-
-          sudo usermod -aG sudo,audio,video,plugdev "${RDP_USERNAME}"
+          # --- user (idempotent) ---
+          id "${RDP_USERNAME}" >/dev/null 2>&1 || sudo useradd -m -s /bin/bash "${RDP_USERNAME}"
+          sudo usermod -aG sudo,audio,video,plugdev,netdev "${RDP_USERNAME}"
           echo "${RDP_USERNAME}:${RDP_PASSWORD}" | sudo chpasswd
-
           echo "${RDP_USERNAME} ALL=(ALL) NOPASSWD:ALL" | \
             sudo tee "/etc/sudoers.d/${RDP_USERNAME}" >/dev/null
           sudo chmod 0440 "/etc/sudoers.d/${RDP_USERNAME}"
 
           USER_HOME="/home/${RDP_USERNAME}"
-          sudo mkdir -p \
+          sudo -u "${RDP_USERNAME}" mkdir -p \
             "${USER_HOME}/Persist" \
             "${USER_HOME}/D/Programs" \
             "${USER_HOME}/D/Wine" \
             "${USER_HOME}/D/Steam" \
-            "${USER_HOME}/D/Downloads"
+            "${USER_HOME}/D/Downloads" \
+            "${USER_HOME}/.config"
 
-          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}"
-
-          # XRDP -> Ubuntu Desktop GNOME on Xorg
+          # --- XRDP session script: GNOME on Xorg ---
           sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
           #!/bin/sh
           export LANG=en_US.UTF-8
@@ -93,223 +97,176 @@ jobs:
           export GNOME_SHELL_SESSION_MODE=ubuntu
           export XDG_SESSION_TYPE=x11
           unset DBUS_SESSION_BUS_ADDRESS
+          unset WAYLAND_DISPLAY
           exec dbus-run-session -- gnome-session --session=ubuntu
           EOF
           sudo chmod 0755 /etc/xrdp/startwm.sh
 
           sudo ln -sfn "${USER_HOME}/D" "${USER_HOME}/D_DRIVE"
-          sudo chown -h "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/D_DRIVE"
 
-          sudo systemctl enable --now xrdp
-          sudo systemctl restart xrdp
+          # --- polkit: skip colord dialogs (fixes black/frozen first login) ---
+          sudo tee /etc/polkit-1/localauthority/50-local.d/45-allow-xrdp.pkla >/dev/null <<'EOF'
+          [Allow Colord for RDP]
+          Identity=unix-user:*
+          Action=org.freedesktop.color-manager.*
+          ResultAny=yes
+          ResultInactive=yes
+          ResultActive=yes
 
-          # Prepare PipeWire/PulseAudio for RDP audio redirection.
-          # The RDP virtual audio sink is created by pipewire-module-xrdp
-          # when the XRDP session starts.
-          sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config/pipewire/pipewire.conf.d"
+          [Allow NetworkManager for RDP]
+          Identity=unix-user:*
+          Action=org.freedesktop.NetworkManager.*
+          ResultAny=yes
+          ResultInactive=yes
+          ResultActive=yes
+          EOF
+
+          # --- XRDP tuning: low bpp + sane security, single-session reconnect ---
+          sudo sed -i \
+            -e '/^max_bpp=/d' -e '/^xserverbpp=/d' \
+            -e '/^security_layer=/d' -e '/^crypt_level=/d' \
+            -e '/^\[Globals\]/a max_bpp=16\nxserverbpp=16\nsecurity_layer=negotiate\ncrypt_level=high' \
+            /etc/xrdp/xrdp.ini
+
           sudo loginctl enable-linger "${RDP_USERNAME}" || true
+          sudo systemctl enable --now xrdp
+          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}"
+          echo "Fast desktop/XRDP setup complete."
 
-          sudo systemctl restart xrdp
-
-          echo "Fast Ubuntu Desktop/XRDP setup complete."
-
-
-      - name: Configure Tailscale
+      - name: Tailscale up
         shell: bash
         run: |
           set -euo pipefail
+          [[ -n "${TAILSCALE_AUTH_KEY:-}" ]] || { echo "::error::TAILSCALE_AUTH_KEY secret missing"; exit 1; }
 
-          if [[ -z "${TAILSCALE_AUTH_KEY:-}" ]]; then
-            echo "::error::TAILSCALE_AUTH_KEY secret is missing"
-            exit 1
-          fi
-
-          if ! command -v tailscale >/dev/null 2>&1; then
-            echo "Installing Tailscale..."
+          command -v tailscale >/dev/null 2>&1 || \
             timeout 180s bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'
-          fi
-
           sudo systemctl enable --now tailscaled
 
-          TS_UP_OK=false
           for attempt in 1 2 3; do
-            echo "Tailscale authentication attempt ${attempt}/3..."
-            if sudo timeout 90s tailscale up \
+            echo "Tailscale auth attempt ${attempt}/3..."
+            sudo timeout 90s tailscale up \
               --auth-key="${TAILSCALE_AUTH_KEY}" \
               --hostname="ubuntu-gh-${GITHUB_RUN_ID}" \
-              --accept-dns=false \
-              --timeout=75s; then
-              TS_UP_OK=true
-              break
-            fi
-
-            echo "Tailscale attempt ${attempt} failed; retrying in 5s..."
+              --accept-dns=false --timeout=75s && break
             sleep 5
-          done
+          done || { echo "::error::Tailscale failed"; sudo tailscale status || true; exit 1; }
 
-          if [[ "${TS_UP_OK}" != true ]]; then
-            echo "::error::Tailscale did not become ready"
-            sudo tailscale status || true
-            sudo systemctl status tailscaled --no-pager || true
-            exit 1
-          fi
-
-          TS_IP="$(sudo tailscale ip -4 | head -n1 || true)"
-          if [[ -z "${TS_IP}" ]]; then
-            echo "::error::Tailscale connected but no IPv4 address was returned"
-            exit 1
-          fi
-
-          echo "Tailscale IPv4: ${TS_IP}"
+          TS_IP="$(sudo tailscale ip -4 | head -n1)"
+          [[ -n "${TS_IP}" ]] || { echo "::error::No Tailscale IPv4"; exit 1; }
           echo "TAILSCALE_IP=${TS_IP}" >> "${GITHUB_ENV}"
+          echo "${TS_IP}" | sudo tee "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" >/dev/null
 
-          sudo mkdir -p "/home/${RDP_USERNAME}"
-          printf '%s\n' "${TS_IP}" | \
-            sudo tee "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" >/dev/null
-          sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" \
-            "/home/${RDP_USERNAME}/TAILSCALE_IP.txt"
-
-      - name: Diagnose XRDP and network
-        shell: bash
-        run: |
-          set +e
-
-          echo "===== XRDP SERVICE ====="
-          sudo systemctl status xrdp --no-pager || true
-
-          echo "===== TCP 3389 ====="
-          sudo ss -lntp | grep ':3389' || \
-            echo "ERROR: Nothing is listening on TCP 3389"
-
-          echo "===== LOCAL RDP TEST ====="
-          if timeout 5 bash -c '</dev/tcp/127.0.0.1/3389' 2>/dev/null; then
-            echo "OK: TCP 3389 is reachable locally"
-          else
-            echo "ERROR: TCP 3389 is NOT reachable locally"
-          fi
-
-          echo "===== XRDP LOG ====="
-          sudo journalctl -u xrdp --no-pager -n 40 || true
-
-          echo "===== TAILSCALE ====="
-          sudo tailscale status || true
-
-          echo "===== FIREWALL ====="
-          sudo ufw status verbose 2>/dev/null || true
-
-      # Connection is available BEFORE any Wine/Steam work.
-      - name: Tune Ubuntu desktop for XRDP
+      # ==================================================================
+      # PHASE 2 — Desktop tuning while RDP is already reachable
+      # ==================================================================
+      - name: Tune GNOME for XRDP (low CPU)
         shell: bash
         run: |
           set -e
           USER_HOME="/home/${RDP_USERNAME}"
+          CFG="${USER_HOME}/.config"
 
-          # Keep GNOME on Xorg for XRDP instead of Wayland.
-          sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config"
+          # GNOME dconf defaults — no animations, no hot corners.
+          sudo -u "${RDP_USERNAME}" dbus-run-session -- bash -c '
+            gsettings set org.gnome.desktop.interface enable-animations false
+            gsettings set org.gnome.desktop.interface enable-hot-corners false
+            gsettings set org.gnome.desktop.wm.preferences button-layout ":close"
+            gsettings set org.gnome.shell welcome-dialog-last-shown-version "$(gnome-shell --version | awk "{print \\$3}")"
+          ' || true
 
-          # Disable common visual effects that waste CPU/framebuffer work.
-          sudo -u "${RDP_USERNAME}" dbus-run-session -- gsettings set org.gnome.desktop.interface enable-animations false || true
-          sudo -u "${RDP_USERNAME}" dbus-run-session -- gsettings set org.gnome.desktop.interface enable-hot-corners false || true
+          # Disable tracker3 miners (CPU burn on headless/RDP).
+          sudo -u "${RDP_USERNAME}" mkdir -p "${CFG}/autostart"
+          for miner in tracker-miner-fs-3.desktop tracker-extract-3.desktop tracker-miner-rss-3.desktop; do
+            printf '[Desktop Entry]\nHidden=true\nNoDisplay=true\n' | \
+              sudo tee "${CFG}/autostart/${miner}" >/dev/null
+          done
 
-          # Lower XRDP color depth to reduce framebuffer traffic/encoding work.
-          sudo sed -i '/^max_bpp=/d;/^xserverbpp=/d' /etc/xrdp/xrdp.ini
-          sudo sed -i '/^\[Globals\]/a max_bpp=16\nxserverbpp=16' /etc/xrdp/xrdp.ini
+          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${CFG}"
 
-          sudo systemctl restart xrdp
+      - name: Diagnose (brief)
+        shell: bash
+        run: |
+          set +e
+          sudo systemctl is-active xrdp && echo "XRDP: active" || echo "XRDP: NOT active"
+          sudo ss -lnt | grep -q ':3389' && echo "TCP 3389: listening" || echo "TCP 3389: NOT listening"
+          timeout 5 bash -c '</dev/tcp/127.0.0.1/3389' 2>/dev/null && echo "Local RDP probe: OK" || echo "Local RDP probe: FAIL"
+          sudo tailscale status || true
+          sudo journalctl -u xrdp --no-pager -n 25 || true
 
       - name: Connection info
         shell: bash
         run: |
-          set -euo pipefail
+          {
+            echo "========================================"
+            echo "       UBUNTU CLOUD PC READY"
+            echo "========================================"
+            echo "OS        : Ubuntu 24.04 (minimal desktop)"
+            echo "Remote    : XRDP port 3389"
+            echo "Audio     : RDP audio redirection (PipeWire)"
+            echo "User      : ${RDP_USERNAME}"
+            echo "Tailscale : ${TAILSCALE_IP}"
+            echo ""
+            echo "RDP address:  ${TAILSCALE_IP}:3389"
+            echo "Wine       : ${INSTALL_WINE} (background, non-blocking)"
+            echo "D:         -> /home/${RDP_USERNAME}/D"
+            echo "Persist    -> /home/${RDP_USERNAME}/${PERSIST_REL}"
+            echo "========================================"
+          } | tee "${GITHUB_STEP_SUMMARY}"
 
-          echo "========================================"
-          echo "       UBUNTU CLOUD PC READY"
-          echo "========================================"
-          echo "OS        : Ubuntu 24.04"
-          echo "Desktop   : Ubuntu Desktop (GNOME on Xorg)"
-          echo "Remote    : XRDP on port 3389"
-          echo "Audio     : RDP audio redirection (PipeWire)"
-          echo "User      : ${RDP_USERNAME}"
-          echo "Tailscale : ${TAILSCALE_IP:-not found}"
-          echo ""
-          echo "RDP address:"
-          echo "  ${TAILSCALE_IP:-not-found}:3389"
-          echo ""
-          echo "Wine/Steam:"
-          echo "  NOT installed during boot (fast-start mode)"
-          echo ""
-          echo "Storage:"
-          echo "  D:      -> /home/${RDP_USERNAME}/D"
-          echo "  Persist -> /home/${RDP_USERNAME}/${PERSIST_REL}"
-          echo "========================================"
-
-      # Optional setup runs AFTER the connection information is available.
-      # It does not block the first RDP connection.
-      - name: Optional Wine setup (background)
+      # ==================================================================
+      # PHASE 3 — Background extras (never blocks first RDP connect)
+      # ==================================================================
+      - name: Wine setup (background)
+        if: ${{ env.INSTALL_WINE == 'true' }}
         shell: bash
         run: |
           set +e
-
           USER_HOME="/home/${RDP_USERNAME}"
-          WINEPREFIX="${USER_HOME}/D/Wine"
 
-          (
-            echo "Starting optional Wine setup in background..."
-            sudo DEBIAN_FRONTEND=noninteractive dpkg --add-architecture i386
-            sudo apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-              wine winetricks cabextract || true
+          sudo tee /usr/local/bin/wine-setup.sh >/dev/null <<'EOF'
+          #!/bin/bash
+          set -x
+          U="${RDP_USERNAME}"
+          H="/home/${U}"
+          WINEPREFIX="${H}/D/Wine"
 
-            sudo install -d -o "${RDP_USERNAME}" -g "${RDP_USERNAME}" "$WINEPREFIX"
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            wine winetricks cabextract || exit 0
 
-            sudo -u "${RDP_USERNAME}" env \
-              HOME="${USER_HOME}" \
-              WINEPREFIX="$WINEPREFIX" \
-              timeout 120s wineboot -u || true
+          sudo install -d -o "${U}" -g "${U}" "$WINEPREFIX"
+          sudo -u "${U}" env HOME="${H}" WINEPREFIX="$WINEPREFIX" WINEDEBUG=-all \
+            timeout 180s wineboot -u || true
 
-            sudo ln -sfn "$WINEPREFIX" "${USER_HOME}/.wine"
-            sudo chown -h "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/.wine"
+          sudo ln -sfn "$WINEPREFIX" "${H}/.wine"
+          sudo chown -h "${U}:${U}" "${H}/.wine"
+          echo "Wine setup finished."
+          EOF
+          sudo chmod +x /usr/local/bin/wine-setup.sh
 
-            echo "Optional Wine setup finished."
-          ) > "${USER_HOME}/wine-setup.log" 2>&1 &
+          setsid sudo -E /usr/local/bin/wine-setup.sh \
+            > "${USER_HOME}/wine-setup.log" 2>&1 < /dev/null &
+          disown || true
+          echo "Wine setup started in background. Log: ${USER_HOME}/wine-setup.log"
 
-          echo "Wine setup started in background."
-          echo "Log: ${USER_HOME}/wine-setup.log"
-
-      - name: Keep Ubuntu runner alive
+      - name: Keep alive
         shell: bash
         run: |
           set -euo pipefail
-
-          if ! [[ "${MAX_HOURS}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::max-hours must be a positive whole number"
-            exit 1
-          fi
+          [[ "${MAX_HOURS}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::max-hours must be a positive integer"; exit 1; }
 
           MAX_SECONDS=$(( MAX_HOURS * 3600 ))
           START=$(date +%s)
-
-          echo "Keeping Ubuntu desktop alive for up to ${MAX_HOURS} hour(s)."
-          echo "Create STOP_WORKFLOW.txt in the workspace to stop early."
+          echo "Alive for up to ${MAX_HOURS}h. Touch STOP_WORKFLOW.txt to stop early."
 
           while true; do
-            if [[ -f STOP_WORKFLOW.txt ]]; then
-              echo "STOP_WORKFLOW.txt detected - stopping early."
-              break
-            fi
-
-            if ! systemctl is-active --quiet xrdp; then
-              echo "XRDP is not active; attempting restart..."
-              sudo systemctl restart xrdp || true
-            fi
-
+            [[ -f STOP_WORKFLOW.txt ]] && { echo "Stop file detected."; break; }
+            systemctl is-active --quiet xrdp || sudo systemctl restart xrdp || true
             NOW=$(date +%s)
-            if (( NOW - START >= MAX_SECONDS )); then
-              echo "Maximum runtime (${MAX_HOURS}h) reached."
-              break
-            fi
-
-            echo "Ubuntu Cloud PC alive - $(( (NOW - START) / 60 )) minute(s) elapsed."
+            (( NOW - START >= MAX_SECONDS )) && { echo "Max runtime reached."; break; }
+            echo "Alive: $(( (NOW - START) / 60 )) min"
             sleep 60
           done
 
@@ -319,25 +276,14 @@ jobs:
         run: |
           set +e
           mkdir -p backup
-
-          [[ -f "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" ]] && \
-            cp "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" backup/
-
-          [[ -f "/home/${RDP_USERNAME}/wine-setup.log" ]] && \
-            cp "/home/${RDP_USERNAME}/wine-setup.log" backup/
-
-          if [[ -d "/home/${RDP_USERNAME}/${PERSIST_REL}" ]]; then
-            tar -czf backup/persist.tar.gz \
-              -C "/home/${RDP_USERNAME}" "${PERSIST_REL}" 2>/dev/null || true
-          fi
-
-          dpkg-query -W -f='${binary:Package}\t${Version}\n' \
-            > backup/installed-packages.txt 2>/dev/null || true
-
-          sudo tailscale status > backup/tailscale-status.txt 2>&1 || true
-          sudo systemctl status xrdp --no-pager > backup/xrdp-status.txt 2>&1 || true
-
-          ls -lh backup/ || true
+          cp "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" backup/ 2>/dev/null
+          cp "/home/${RDP_USERNAME}/wine-setup.log" backup/ 2>/dev/null
+          [[ -d "/home/${RDP_USERNAME}/${PERSIST_REL}" ]] && \
+            tar -czf backup/persist.tar.gz -C "/home/${RDP_USERNAME}" "${PERSIST_REL}" 2>/dev/null
+          dpkg-query -W -f='${binary:Package}\t${Version}\n' > backup/installed-packages.txt 2>/dev/null
+          sudo tailscale status > backup/tailscale-status.txt 2>&1
+          sudo systemctl status xrdp --no-pager > backup/xrdp-status.txt 2>&1
+          ls -lh backup/
 
       - name: Upload artifact
         if: always()
@@ -353,5 +299,4 @@ jobs:
         shell: bash
         run: |
           set +e
-          sudo systemctl stop xrdp 2>/dev/null || true
-          sudo systemctl stop tailscaled 2>/dev/null || true
+          sudo systemctl stop xrdp tailscaled 2>/dev/null
