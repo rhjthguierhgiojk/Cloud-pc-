@@ -28,7 +28,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare Ubuntu desktop
+      - name: Prepare Ubuntu desktop (fixed Plasma X11 package)
         shell: bash
         run: |
           set -euo pipefail
@@ -44,7 +44,7 @@ jobs:
           echo "Installing KDE Plasma, XRDP, Wine, Steam dependencies and utilities..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             plasma-desktop \
-            plasma-workspace-x11 \
+            plasma-session-x11 \
             kde-config-sddm \
             xrdp \
             xorgxrdp \
