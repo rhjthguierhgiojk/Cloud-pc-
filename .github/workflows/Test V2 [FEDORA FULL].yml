@@ -357,29 +357,69 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          QEMU_ARGS=(
+            -machine q35
+            -cpu max
+            -smp 2
+            -m 5G
+            -drive "file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback"
+            -drive "file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback"
+            -drive "file=seed.iso,media=cdrom,readonly=on"
+            -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389"
+            -device "virtio-net-pci,netdev=net0"
+            -display none
+            -serial "file:fedora-serial.log"
+            -monitor none
+          )
+
+          rm -f fedora-serial.log qemu.log qemu.pid
+
+          # GitHub-hosted runners can expose /dev/kvm without granting the
+          # runner user permission to open it. Try KVM with passwordless sudo.
           if [[ -e /dev/kvm ]]; then
-          ACCEL="kvm"
-          echo "Using KVM acceleration"
+            echo "KVM device detected; trying KVM with sudo..."
+            nohup sudo -n qemu-system-x86_64 \
+              "${QEMU_ARGS[@]}" \
+              -machine q35,accel=kvm \
+              > qemu.log 2>&1 &
+            echo $! > qemu.pid
+            sleep 2
+
+            if kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+              echo "Using KVM acceleration"
+            else
+              echo "KVM could not be initialized; falling back to TCG..."
+              echo "----- KVM startup log -----"
+              cat qemu.log || true
+              rm -f qemu.pid fedora-serial.log
+              nohup qemu-system-x86_64 \
+                "${QEMU_ARGS[@]}" \
+                -machine q35,accel=tcg \
+                > qemu.log 2>&1 &
+              echo $! > qemu.pid
+              sleep 2
+              if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+                echo "::error::QEMU failed in both KVM and TCG modes"
+                cat qemu.log || true
+                exit 1
+              fi
+              echo "Using TCG fallback"
+            fi
           else
-          ACCEL="tcg"
-          echo "KVM not available - falling back to TCG (will be slow)"
+            echo "KVM device not available; using TCG (will be slower)"
+            nohup qemu-system-x86_64 \
+              "${QEMU_ARGS[@]}" \
+              -machine q35,accel=tcg \
+              > qemu.log 2>&1 &
+            echo $! > qemu.pid
+            sleep 2
+            if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+              echo "::error::QEMU failed to start in TCG mode"
+              cat qemu.log || true
+              exit 1
+            fi
           fi
 
-          nohup qemu-system-x86_64 \
-            -machine q35,accel=${ACCEL} \
-            -cpu max \
-            -smp 2 \
-            -m 5G \
-            -drive file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback \
-            -drive file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback \
-            -drive file=seed.iso,media=cdrom,readonly=on \
-            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
-            -device virtio-net-pci,netdev=net0 \
-            -display none \
-            -serial file:fedora-serial.log \
-            -monitor none \
-            > qemu.log 2>&1 &
-          echo $! > qemu.pid
           echo "QEMU started (PID $(cat qemu.pid))"
 
       - name: Wait for Fedora setup
