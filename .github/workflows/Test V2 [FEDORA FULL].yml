@@ -353,32 +353,32 @@ jobs:
             seed/user-data seed/meta-data seed/network-config
           echo "Seed ISO created ($(du -h seed.iso | cut -f1))"
 
-      - name: Boot Fedora VM (C: + D: disks)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -e /dev/kvm ]]; then
-            ACCEL="kvm"
-            echo "Using KVM acceleration"
-          else
-            ACCEL="tcg"
-            echo "KVM not available - falling back to TCG (will be slow)"
-          fi
+          - name: Boot Fedora VM (C: + D: disks)
+            shell: bash
+            run: |
+            set -euo pipefail
+            if [[ -e /dev/kvm ]]; then
+             ACCEL="kvm"
+             echo "Using KVM acceleration"
+           else
+             ACCEL="tcg"
+             echo "KVM not available - falling back to TCG (will be slow)"
+           fi
 
-          nohup qemu-system-x86_64 \
-            -machine q35,accel=${ACCEL} \
-            -cpu max \
-            -smp 2 \
-            -m 5G \
-            -drive file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback \
-            -drive file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback \
-            -drive file=seed.iso,media=cdrom,readonly=on \
-            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
-            -device virtio-net-pci,netdev=net0 \
-            -display none \
-            -serial file:fedora-serial.log \
-            -monitor none \
-            > qemu.log 2>&1 &
+           nohup qemu-system-x86_64 \
+             -machine q35,accel=${ACCEL} \
+             -cpu max \
+             -smp 2 \
+             -m 5G \
+             -drive file=fedora-system.qcow2,if=virtio,format=qcow2,cache=writeback \
+             -drive file=fedora-data.qcow2,if=virtio,format=qcow2,cache=writeback \
+             -drive file=seed.iso,media=cdrom,readonly=on \
+             -netdev user,id=net0,hostfwd=tcp:127.0.0.1:13389-:3389 \
+             -device virtio-net-pci,netdev=net0 \
+             -display none \
+             -serial file:fedora-serial.log \
+             -monitor none \
+             > qemu.log 2>&1 &
           echo $! > qemu.pid
           echo "QEMU started (PID $(cat qemu.pid))"
 
