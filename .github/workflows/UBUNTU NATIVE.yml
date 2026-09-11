@@ -1,4 +1,4 @@
-name: Ubuntu Cloud PC V3
+name: Ubuntu Cloud PC V4 - FAST BOOT
 
 on:
   workflow_dispatch:
@@ -28,7 +28,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare Ubuntu desktop (fixed Plasma X11 package)
+      # FAST PATH: only install what is needed to get a usable KDE/XRDP
+      # desktop online. Wine/Steam are intentionally NOT installed here.
+      - name: Fast install KDE + XRDP
         shell: bash
         run: |
           set -euo pipefail
@@ -38,57 +40,53 @@ jobs:
             exit 1
           fi
 
-          echo "Updating Ubuntu package indexes..."
+          echo "Updating package indexes..."
           sudo apt-get update
 
-          echo "Installing KDE Plasma, XRDP, Wine, Steam dependencies and utilities..."
+          echo "Installing minimal KDE/X11 + XRDP stack..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             plasma-desktop \
             kwin-x11 \
-            kde-config-sddm \
             xrdp \
             xorgxrdp \
-            dbus-x11 \
-            policykit-1 \
-            network-manager \
-            curl \
-            wget \
-            git \
-            unzip \
-            tar \
-            p7zip-full \
-            firewalld \
             pipewire \
             pipewire-pulse \
-            wireplumber \
-            wine \
-            winetricks \
-            cabextract \
-            fuse3 \
+            pipewire-module-xrdp \
             mesa-vulkan-drivers \
             mesa-utils \
-            software-properties-common \
-            ca-certificates
+            vulkan-tools \
+            dbus-x11 \
+            curl \
+            ca-certificates \
+            wget \
+            unzip \
+            tar \
+            p7zip-full
 
-          # Create the desktop user if the runner image does not already have it.
           if id "${RDP_USERNAME}" >/dev/null 2>&1; then
             echo "User ${RDP_USERNAME} already exists."
           else
             sudo useradd -m -s /bin/bash "${RDP_USERNAME}"
-            sudo usermod -aG sudo,audio,video,plugdev "${RDP_USERNAME}"
           fi
 
-          echo "${RDP_USERNAME}:${RDP_PASSWORD}" | sudo chpasswd
           sudo usermod -aG sudo,audio,video,plugdev "${RDP_USERNAME}"
-          sudo mkdir -p "/home/${RDP_USERNAME}/Persist"
-          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "/home/${RDP_USERNAME}"
+          echo "${RDP_USERNAME}:${RDP_PASSWORD}" | sudo chpasswd
 
-          # Passwordless sudo is useful for the temporary cloud-PC session.
           echo "${RDP_USERNAME} ALL=(ALL) NOPASSWD:ALL" | \
             sudo tee "/etc/sudoers.d/${RDP_USERNAME}" >/dev/null
           sudo chmod 0440 "/etc/sudoers.d/${RDP_USERNAME}"
 
-          # Make KDE the XRDP session.
+          USER_HOME="/home/${RDP_USERNAME}"
+          sudo mkdir -p \
+            "${USER_HOME}/Persist" \
+            "${USER_HOME}/D/Programs" \
+            "${USER_HOME}/D/Wine" \
+            "${USER_HOME}/D/Steam" \
+            "${USER_HOME}/D/Downloads"
+
+          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}"
+
+          # XRDP -> KDE Plasma X11
           sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
           #!/bin/sh
           export LANG=en_US.UTF-8
@@ -102,116 +100,35 @@ jobs:
           EOF
           sudo chmod 0755 /etc/xrdp/startwm.sh
 
-          sudo systemctl enable --now NetworkManager || true
-          sudo systemctl enable --now xrdp
-          sudo systemctl restart xrdp
-
-          echo "Ubuntu desktop base setup complete."
-
-      - name: Prepare persistent folders and DDLC wallpaper
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          USER_HOME="/home/${RDP_USERNAME}"
-          PERSIST_DIR="${USER_HOME}/${PERSIST_REL}"
-
-          sudo mkdir -p \
-            "${PERSIST_DIR}" \
-            "${USER_HOME}/D/Programs" \
-            "${USER_HOME}/D/Wine" \
-            "${USER_HOME}/D/Steam" \
-            "${USER_HOME}/D/Downloads"
-
-          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" \
-            "${USER_HOME}/D" "${PERSIST_DIR}"
-
-          # Keep the old D: concept, but use a normal directory on the native runner.
           sudo ln -sfn "${USER_HOME}/D" "${USER_HOME}/D_DRIVE"
           sudo chown -h "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/D_DRIVE"
 
-          theme=".github/workflows/ddlc theme v1.deskthemepack"
-          rm -rf ddlc-extract ddlc-wallpaper.bin
-          mkdir -p ddlc-extract
+          sudo systemctl enable --now xrdp
+          sudo systemctl restart xrdp
 
-          if [[ -f "$theme" ]]; then
-            echo "Found DDLC theme package."
-            7z x -y "$theme" -oddlc-extract >/dev/null || true
+          # Prepare PipeWire/PulseAudio for RDP audio redirection.
+          # The RDP virtual audio sink is created by pipewire-module-xrdp
+          # when the XRDP session starts.
+          sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config/pipewire/pipewire.conf.d"
+          sudo loginctl enable-linger "${RDP_USERNAME}" || true
 
-            wallpaper="$(find ddlc-extract -type f \
-              \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
-              | head -n1 || true)"
+          sudo systemctl restart xrdp
 
-            if [[ -n "$wallpaper" ]]; then
-              sudo cp "$wallpaper" "${USER_HOME}/.ddlc-wallpaper"
-              sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/.ddlc-wallpaper"
-              sudo chmod 0644 "${USER_HOME}/.ddlc-wallpaper"
-              echo "Using wallpaper: $wallpaper"
-            else
-              echo "No image found inside theme package."
-            fi
-          else
-            echo "No DDLC theme package present - skipping."
-          fi
-
-      - name: Configure Wine and Steam
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          USER_HOME="/home/${RDP_USERNAME}"
-          WINEPREFIX="${USER_HOME}/D/Wine"
-
-          sudo install -d -o "${RDP_USERNAME}" -g "${RDP_USERNAME}" "$WINEPREFIX"
-
-          echo "Initializing Wine prefix..."
-          sudo -u "${RDP_USERNAME}" env \
-            HOME="${USER_HOME}" \
-            WINEPREFIX="$WINEPREFIX" \
-            timeout 120s wineboot -u || true
-
-          echo "Installing Wine core fonts..."
-          sudo -u "${RDP_USERNAME}" env \
-            HOME="${USER_HOME}" \
-            WINEPREFIX="$WINEPREFIX" \
-            timeout 180s winetricks -q corefonts || true
-
-          sudo ln -sfn "$WINEPREFIX" "${USER_HOME}/.wine"
-          sudo chown -h "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/.wine"
-
-          # Steam is available through Ubuntu's repositories on the runner.
-          echo "Enabling 32-bit architecture and installing Steam if available..."
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y steam-installer || \
-            echo "Steam installer package was unavailable; continuing with Wine/desktop setup."
-
-          echo "Wine/Steam setup finished."
+          echo "Fast KDE/XRDP setup complete."
 
       - name: Configure KDE session
         shell: bash
         run: |
           set -euo pipefail
-
           USER_HOME="/home/${RDP_USERNAME}"
+
+          sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config"
 
           sudo -u "${RDP_USERNAME}" \
             dbus-run-session kwriteconfig6 \
               --file "${USER_HOME}/.config/kdeglobals" \
               --group KDE --key SingleClick false || true
 
-          sudo -u "${RDP_USERNAME}" \
-            dbus-run-session kwriteconfig6 \
-              --file "${USER_HOME}/.config/kwinrc" \
-              --group Compositing --key Enabled true || true
-
-          if [[ -f "${USER_HOME}/.ddlc-wallpaper" ]]; then
-            sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config"
-            echo "DDLC wallpaper is ready at ${USER_HOME}/.ddlc-wallpaper"
-          fi
-
-          sudo loginctl enable-linger "${RDP_USERNAME}" || true
           sudo systemctl restart xrdp
 
           echo "KDE session configured."
@@ -228,10 +145,7 @@ jobs:
 
           if ! command -v tailscale >/dev/null 2>&1; then
             echo "Installing Tailscale..."
-            if ! timeout 180s bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'; then
-              echo "::error::Tailscale installation timed out or failed"
-              exit 1
-            fi
+            timeout 180s bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'
           fi
 
           sudo systemctl enable --now tailscaled
@@ -253,61 +167,78 @@ jobs:
           done
 
           if [[ "${TS_UP_OK}" != true ]]; then
-            echo "::error::Tailscale did not become ready after 3 attempts"
+            echo "::error::Tailscale did not become ready"
             sudo tailscale status || true
             sudo systemctl status tailscaled --no-pager || true
             exit 1
           fi
 
           TS_IP="$(sudo tailscale ip -4 | head -n1 || true)"
-          echo "Tailscale IPv4: ${TS_IP}"
+          if [[ -z "${TS_IP}" ]]; then
+            echo "::error::Tailscale connected but no IPv4 address was returned"
+            exit 1
+          fi
 
+          echo "Tailscale IPv4: ${TS_IP}"
           echo "TAILSCALE_IP=${TS_IP}" >> "${GITHUB_ENV}"
-          printf '%s\n' "${TS_IP}" | sudo tee "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" >/dev/null
-          sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" "/home/${RDP_USERNAME}/TAILSCALE_IP.txt"
+
+          sudo mkdir -p "/home/${RDP_USERNAME}"
+          printf '%s\n' "${TS_IP}" | \
+            sudo tee "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" >/dev/null
+          sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" \
+            "/home/${RDP_USERNAME}/TAILSCALE_IP.txt"
 
       - name: Diagnose XRDP and network
         shell: bash
         run: |
           set +e
 
-          echo "========================================"
-          echo "  XRDP / NETWORK DIAGNOSTICS"
-          echo "========================================"
-          echo ""
           echo "===== XRDP SERVICE ====="
           sudo systemctl status xrdp --no-pager || true
-          echo ""
-          echo "===== XRDP LISTENING PORT ====="
-          sudo ss -lntp | grep ':3389' || echo "ERROR: Nothing is listening on TCP 3389"
-          echo ""
-          echo "===== XRDP PROCESS ====="
-          pgrep -a xrdp || echo "ERROR: xrdp process not found"
-          echo ""
-          echo "===== XRDP RECENT LOG ====="
-          sudo journalctl -u xrdp --no-pager -n 60 || true
-          echo ""
-          echo "===== LOCAL TCP TEST ====="
+
+          echo "===== TCP 3389 ====="
+          sudo ss -lntp | grep ':3389' || \
+            echo "ERROR: Nothing is listening on TCP 3389"
+
+          echo "===== LOCAL RDP TEST ====="
           if timeout 5 bash -c '</dev/tcp/127.0.0.1/3389' 2>/dev/null; then
             echo "OK: TCP 3389 is reachable locally"
           else
             echo "ERROR: TCP 3389 is NOT reachable locally"
           fi
-          echo ""
-          echo "===== TAILSCALE STATUS ====="
+
+          echo "===== XRDP LOG ====="
+          sudo journalctl -u xrdp --no-pager -n 40 || true
+
+          echo "===== TAILSCALE ====="
           sudo tailscale status || true
-          echo ""
-          echo "===== TAILSCALE IP ====="
-          sudo tailscale ip -4 || true
-          echo ""
+
           echo "===== FIREWALL ====="
           sudo ufw status verbose 2>/dev/null || true
-          sudo firewall-cmd --state 2>/dev/null || true
-          sudo firewall-cmd --list-ports 2>/dev/null || true
-          echo ""
-          echo "========================================"
-          echo "  END DIAGNOSTICS"
-          echo "========================================"
+
+      # Connection is available BEFORE any Wine/Steam work.
+      - name: Setup DXVK + Vulkan software rendering
+        shell: bash
+        run: |
+          set -e
+          echo "=== Vulkan devices ==="
+          vulkaninfo --summary 2>&1 || true
+
+          echo "=== OpenGL renderer ==="
+          glxinfo -B 2>&1 || true
+
+          # DXVK translates Direct3D 9/10/11 to Vulkan.
+          sudo apt-get update -qq
+          sudo apt-get install -y dxvk 2>/dev/null || true
+
+          echo "=== DXVK package ==="
+          dpkg -l | grep -E '^ii[[:space:]]+dxvk([[:space:]]|$)' || true
+
+          echo "=== Vulkan ICDs ==="
+          ls -la /usr/share/vulkan/icd.d/ 2>/dev/null || true
+
+          echo "=== CPU Vulkan (Lavapipe) check ==="
+          VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json             vulkaninfo --summary 2>&1 || true
 
       - name: Connection info
         shell: bash
@@ -315,27 +246,65 @@ jobs:
           set -euo pipefail
 
           echo "========================================"
-          echo "  Ubuntu Cloud PC is ready"
+          echo "       UBUNTU CLOUD PC READY"
           echo "========================================"
           echo "OS        : Ubuntu 24.04"
           echo "Desktop   : KDE Plasma (X11)"
-          echo "Remote    : xrdp on port 3389"
+          echo "Remote    : XRDP on port 3389"
+          echo "Audio     : RDP audio redirection (PipeWire)"
           echo "User      : ${RDP_USERNAME}"
           echo "Tailscale : ${TAILSCALE_IP:-not found}"
+          echo ""
+          echo "RDP address:"
+          echo "  ${TAILSCALE_IP:-not-found}:3389"
+          echo ""
+          echo "Wine/Steam:"
+          echo "  NOT installed during boot (fast-start mode)"
           echo ""
           echo "Storage:"
           echo "  D:      -> /home/${RDP_USERNAME}/D"
           echo "  Persist -> /home/${RDP_USERNAME}/${PERSIST_REL}"
-          echo ""
-          echo "Connect using the Tailscale IP above with an RDP client."
           echo "========================================"
+
+      # Optional setup runs AFTER the connection information is available.
+      # It does not block the first RDP connection.
+      - name: Optional Wine setup (background)
+        shell: bash
+        run: |
+          set +e
+
+          USER_HOME="/home/${RDP_USERNAME}"
+          WINEPREFIX="${USER_HOME}/D/Wine"
+
+          (
+            echo "Starting optional Wine setup in background..."
+            sudo DEBIAN_FRONTEND=noninteractive dpkg --add-architecture i386
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              wine winetricks cabextract mesa-vulkan-drivers mesa-utils || true
+
+            sudo install -d -o "${RDP_USERNAME}" -g "${RDP_USERNAME}" "$WINEPREFIX"
+
+            sudo -u "${RDP_USERNAME}" env \
+              HOME="${USER_HOME}" \
+              WINEPREFIX="$WINEPREFIX" \
+              timeout 120s wineboot -u || true
+
+            sudo ln -sfn "$WINEPREFIX" "${USER_HOME}/.wine"
+            sudo chown -h "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/.wine"
+
+            echo "Optional Wine setup finished."
+          ) > "${USER_HOME}/wine-setup.log" 2>&1 &
+
+          echo "Wine setup started in background."
+          echo "Log: ${USER_HOME}/wine-setup.log"
 
       - name: Keep Ubuntu runner alive
         shell: bash
         run: |
           set -euo pipefail
 
-          MAX_SECONDS=$(( ${MAX_HOURS} * 3600 ))
+          MAX_SECONDS=$(( MAX_HOURS * 3600 ))
           START=$(date +%s)
 
           echo "Keeping Ubuntu desktop alive for up to ${MAX_HOURS} hour(s)."
@@ -367,12 +336,13 @@ jobs:
         shell: bash
         run: |
           set +e
-
           mkdir -p backup
 
-          if [[ -f "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" ]]; then
+          [[ -f "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" ]] && \
             cp "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" backup/
-          fi
+
+          [[ -f "/home/${RDP_USERNAME}/wine-setup.log" ]] && \
+            cp "/home/${RDP_USERNAME}/wine-setup.log" backup/
 
           if [[ -d "/home/${RDP_USERNAME}/${PERSIST_REL}" ]]; then
             tar -czf backup/persist.tar.gz \
@@ -382,8 +352,8 @@ jobs:
           dpkg-query -W -f='${binary:Package}\t${Version}\n' \
             > backup/installed-packages.txt 2>/dev/null || true
 
-          tailscale status > backup/tailscale-status.txt 2>&1 || true
-          systemctl status xrdp --no-pager > backup/xrdp-status.txt 2>&1 || true
+          sudo tailscale status > backup/tailscale-status.txt 2>&1 || true
+          sudo systemctl status xrdp --no-pager > backup/xrdp-status.txt 2>&1 || true
 
           ls -lh backup/ || true
 
@@ -401,6 +371,5 @@ jobs:
         shell: bash
         run: |
           set +e
-          rm -rf ddlc-extract ddlc-wallpaper.bin
           sudo systemctl stop xrdp 2>/dev/null || true
           sudo systemctl stop tailscaled 2>/dev/null || true
