@@ -387,18 +387,16 @@ jobs:
         run: |
           set -euo pipefail
           echo "Waiting for cloud-init + finalize script (TCG is slow, this can take 15–25 min)..."
-          
+
           # Wait up to 30 minutes
           for i in $(seq 1 180); do
             sleep 10
-            
-            # Success condition
+
             if grep -q "Fedora Cloud PC setup complete" fedora-serial.log 2>/dev/null; then
-              echo "✅ Setup completed successfully!"
+              echo "Setup completed successfully!"
               break
             fi
-            
-            # QEMU died
+
             if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
               echo "::error::QEMU process died"
               echo "----- qemu.log -----"
@@ -407,8 +405,7 @@ jobs:
               tail -n 100 fedora-serial.log || true
               exit 1
             fi
-            
-            # Progress every 60 seconds
+
             if (( i % 6 == 0 )); then
               echo "Still waiting... ($((i*10))s elapsed)"
               echo "----- last 8 lines of serial log -----"
