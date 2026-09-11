@@ -1,4 +1,4 @@
-name: Fedora Cloud PC v2 (KDE + xrdp + Tailscale + Wine/Proton)
+name: Fedora Runner V2
 
 on:
   workflow_dispatch:
