@@ -1,4 +1,4 @@
-name: Ubuntu Cloud PC V7 - FAST BOOT (polkit fix)
+name: Ubuntu Cloud PC V8.1 - XFCE RDP-hardened
 
 on:
   workflow_dispatch:
@@ -15,6 +15,10 @@ on:
         description: "Install Wine in background after RDP is up (true/false)"
         required: false
         default: "true"
+      desktop-flavor:
+        description: "Desktop: gnome-minimal (default), xfce, or lxqt"
+        required: false
+        default: "gnome-minimal"
 
 env:
   RDP_USERNAME: Winn_core
@@ -30,6 +34,7 @@ jobs:
       PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       MAX_HOURS: ${{ github.event.inputs['max-hours'] || '4' }}
       INSTALL_WINE: ${{ github.event.inputs['install-wine'] || 'true' }}
+      DESKTOP: ${{ github.event.inputs['desktop-flavor'] || 'gnome-minimal' }}
 
     steps:
       - name: Checkout repository
@@ -55,18 +60,27 @@ jobs:
           Dir::Cache::Archives "/var/cache/apt/archives";
           EOF
 
-          echo "::group::apt install desktop+xrdp"
+          # --- Pick desktop stack by flavor (GitHub runner has NO desktop
+          #     preinstalled; we install the smallest viable set) ---
+          case "${DESKTOP}" in
+            xfce)      DE_PKGS="xfce4 xfce4-goodies xfce4-terminal thunar dbus-x11" ;;
+            lxqt)      DE_PKGS="lxqt-core qterminal dbus-x11" ;;
+            *)         DE_PKGS="ubuntu-desktop-minimal" ; DESKTOP="gnome-minimal" ;;
+          esac
+
+          # --- Skip packages already present on the runner image ---
+          WANTED="${DE_PKGS} xrdp xorgxrdp pipewire pipewire-pulse \
+            pipewire-module-xrdp wireplumber \
+            curl ca-certificates wget unzip tar p7zip-full"
+          MISSING=""
+          for pkg in ${WANTED}; do
+            dpkg -s "${pkg}" >/dev/null 2>&1 || MISSING="${MISSING} ${pkg}"
+          done
+
+          echo "::group::apt install (${DESKTOP}) — missing:${MISSING:- none}"
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            ubuntu-desktop-minimal \
-            xrdp \
-            xorgxrdp \
-            pipewire \
-            pipewire-pulse \
-            pipewire-module-xrdp \
-            wireplumber \
-            dbus-x11 \
-            curl ca-certificates wget unzip tar p7zip-full
+          # shellcheck disable=SC2086
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ${MISSING}
           echo "::endgroup::"
 
           # --- user (idempotent) ---
@@ -86,19 +100,41 @@ jobs:
             "${USER_HOME}/D/Downloads" \
             "${USER_HOME}/.config"
 
-          # --- XRDP session script: GNOME on Xorg ---
-          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
+          # --- XRDP session script (flavor-aware) ---
+          case "${DESKTOP}" in
+            xfce) STARTWM='startxfce4' ;;
+            lxqt) STARTWM='startlxqt' ;;
+            *)    STARTWM='gnome-session --session=ubuntu' ;;
+          esac
+
+          sudo tee /etc/xrdp/startwm.sh >/dev/null <<EOF
           #!/bin/sh
           export LANG=en_US.UTF-8
           export LC_ALL=en_US.UTF-8
-          export XDG_CURRENT_DESKTOP=GNOME
-          export XDG_SESSION_DESKTOP=ubuntu
-          export DESKTOP_SESSION=ubuntu
-          export GNOME_SHELL_SESSION_MODE=ubuntu
           export XDG_SESSION_TYPE=x11
           unset DBUS_SESSION_BUS_ADDRESS
           unset WAYLAND_DISPLAY
-          exec dbus-run-session -- gnome-session --session=ubuntu
+          case "${DESKTOP}" in
+            gnome-minimal)
+              export XDG_CURRENT_DESKTOP=GNOME
+              export XDG_SESSION_DESKTOP=ubuntu
+              export DESKTOP_SESSION=ubuntu
+              export GNOME_SHELL_SESSION_MODE=ubuntu
+              exec dbus-run-session -- gnome-session --session=ubuntu
+              ;;
+            xfce)
+              export XDG_CURRENT_DESKTOP=XFCE
+              export XDG_SESSION_DESKTOP=xfce
+              export DESKTOP_SESSION=xfce
+              exec dbus-run-session -- startxfce4
+              ;;
+            lxqt)
+              export XDG_CURRENT_DESKTOP=LXQt
+              export XDG_SESSION_DESKTOP=lxqt
+              export DESKTOP_SESSION=lxqt
+              exec dbus-run-session -- startlxqt
+              ;;
+          esac
           EOF
           sudo chmod 0755 /etc/xrdp/startwm.sh
 
@@ -161,28 +197,45 @@ jobs:
       # ==================================================================
       # PHASE 2 — Desktop tuning while RDP is already reachable
       # ==================================================================
-      - name: Tune GNOME for XRDP (low CPU)
+      - name: Tune desktop for XRDP (low CPU)
         shell: bash
         run: |
           set -e
           USER_HOME="/home/${RDP_USERNAME}"
           CFG="${USER_HOME}/.config"
-
-          # GNOME dconf defaults — no animations, no hot corners.
-          sudo -u "${RDP_USERNAME}" dbus-run-session -- bash -c '
-            gsettings set org.gnome.desktop.interface enable-animations false
-            gsettings set org.gnome.desktop.interface enable-hot-corners false
-            gsettings set org.gnome.desktop.wm.preferences button-layout ":close"
-            gsettings set org.gnome.shell welcome-dialog-last-shown-version "$(gnome-shell --version | awk "{print \\$3}")"
-          ' || true
-
-          # Disable tracker3 miners (CPU burn on headless/RDP).
-          sudo -u "${RDP_USERNAME}" mkdir -p "${CFG}/autostart"
-          for miner in tracker-miner-fs-3.desktop tracker-extract-3.desktop tracker-miner-rss-3.desktop; do
+          AUTOSTART="${CFG}/autostart"
+          sudo -u "${RDP_USERNAME}" mkdir -p "${AUTOSTART}"
+          
+          # --- XFCE: no screen blank/lock (worst RDP papercut), lighter compositor ---
+          if [[ "${DESKTOP}" == "xfce" ]]; then
+            sudo -u "${RDP_USERNAME}" bash -c "
+              export HOME='${USER_HOME}'
+              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac --create -t int -s 0 2>/dev/null || true
+              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-timeout --create -t int -s 0 2>/dev/null || true
+              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/lock-screen-suspend-hibernate --create -t bool -s false 2>/dev/null || true
+              xfconf-query -c xfwm4 -p /general/sync_to_vblank --create -t bool -s false 2>/dev/null || true
+            "
             printf '[Desktop Entry]\nHidden=true\nNoDisplay=true\n' | \
-              sudo tee "${CFG}/autostart/${miner}" >/dev/null
-          done
-
+              sudo tee "${AUTOSTART}/xscreensaver.desktop" >/dev/null 2>/dev/null || true
+            printf '#!/bin/sh\nxset s off\nxset dpms 0 0 0\nxset -dpms\n' | \
+              sudo tee "${USER_HOME}/.xprofile" >/dev/null
+            sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/.xprofile"
+          fi
+          
+          # --- GNOME: no animations/hot corners, kill tracker miners ---
+          if [[ "${DESKTOP}" == "gnome-minimal" ]]; then
+            sudo -u "${RDP_USERNAME}" dbus-run-session -- bash -c '
+              gsettings set org.gnome.desktop.interface enable-animations false
+              gsettings set org.gnome.desktop.interface enable-hot-corners false
+              gsettings set org.gnome.desktop.wm.preferences button-layout ":close"
+              gsettings set org.gnome.shell welcome-dialog-last-shown-version "$(gnome-shell --version | awk "{print \$3}")"
+            ' || true
+            for miner in tracker-miner-fs-3.desktop tracker-extract-3.desktop tracker-miner-rss-3.desktop; do
+              printf '[Desktop Entry]\nHidden=true\nNoDisplay=true\n' | \
+                sudo tee "${AUTOSTART}/${miner}" >/dev/null
+            done
+          fi
+          
           sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${CFG}"
 
       - name: Diagnose (brief)
@@ -202,7 +255,7 @@ jobs:
             echo "========================================"
             echo "       UBUNTU CLOUD PC READY"
             echo "========================================"
-            echo "OS        : Ubuntu 24.04 (minimal desktop)"
+            echo "OS        : Ubuntu 24.04 (${DESKTOP})"
             echo "Remote    : XRDP port 3389"
             echo "Audio     : RDP audio redirection (PipeWire)"
             echo "User      : ${RDP_USERNAME}"
