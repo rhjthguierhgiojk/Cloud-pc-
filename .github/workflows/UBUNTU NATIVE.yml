@@ -1,4 +1,4 @@
-name: Ubuntu Cloud PC V8.1 - XFCE RDP-hardened
+name: Ubuntu Cloud PC V8.2 - XFCE failsafe fix
 
 on:
   workflow_dispatch:
@@ -63,7 +63,7 @@ jobs:
           # --- Pick desktop stack by flavor (GitHub runner has NO desktop
           #     preinstalled; we install the smallest viable set) ---
           case "${DESKTOP}" in
-            xfce)      DE_PKGS="xfce4 xfce4-goodies xfce4-terminal thunar dbus-x11" ;;
+            xfce)      DE_PKGS="xfce4 xfce4-goodies xfce4-session xfconf xfdesktop4 xfwm4 xfce4-panel xfdesktop4-data dbus-x11 xfce4-terminal thunar" ;;
             lxqt)      DE_PKGS="lxqt-core qterminal dbus-x11" ;;
             *)         DE_PKGS="ubuntu-desktop-minimal" ; DESKTOP="gnome-minimal" ;;
           esac
@@ -126,7 +126,15 @@ jobs:
               export XDG_CURRENT_DESKTOP=XFCE
               export XDG_SESSION_DESKTOP=xfce
               export DESKTOP_SESSION=xfce
-              exec dbus-run-session -- startxfce4
+              export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
+              export XDG_DATA_DIRS=/usr/local/share:/usr/share:/usr/share/xfce4
+              # Classic, XRDP-safe launch (dbus-launch from dbus-x11).
+              # dbus-run-session breaks xfconfd activation on bare XRDP sessions.
+              if command -v dbus-launch >/dev/null 2>&1; then
+                exec dbus-launch --exit-with-session startxfce4
+              else
+                exec startxfce4
+              fi
               ;;
             lxqt)
               export XDG_CURRENT_DESKTOP=LXQt
@@ -208,6 +216,8 @@ jobs:
           
           # --- XFCE: no screen blank/lock (worst RDP papercut), lighter compositor ---
           if [[ "${DESKTOP}" == "xfce" ]]; then
+            # Clear stale/corrupt saved sessions (classic failsafe-session cause)
+            sudo rm -rf "${USER_HOME}/.cache/sessions" 2>/dev/null || true
             sudo -u "${RDP_USERNAME}" bash -c "
               export HOME='${USER_HOME}'
               xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac --create -t int -s 0 2>/dev/null || true
