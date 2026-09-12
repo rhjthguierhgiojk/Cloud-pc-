@@ -1,4 +1,4 @@
-name: Ubuntu Cloud PC V6 - FAST BOOT
+name: Ubuntu Cloud PC V7 - FAST BOOT (polkit fix)
 
 on:
   workflow_dispatch:
@@ -104,21 +104,22 @@ jobs:
 
           sudo ln -sfn "${USER_HOME}/D" "${USER_HOME}/D_DRIVE"
 
-          # --- polkit: skip colord dialogs (fixes black/frozen first login) ---
-          sudo tee /etc/polkit-1/localauthority/50-local.d/45-allow-xrdp.pkla >/dev/null <<'EOF'
-          [Allow Colord for RDP]
-          Identity=unix-user:*
-          Action=org.freedesktop.color-manager.*
-          ResultAny=yes
-          ResultInactive=yes
-          ResultActive=yes
-
-          [Allow NetworkManager for RDP]
-          Identity=unix-user:*
-          Action=org.freedesktop.NetworkManager.*
-          ResultAny=yes
-          ResultInactive=yes
-          ResultActive=yes
+          # --- polkit JS rules: skip colord/network dialogs on RDP login ---
+          # (Ubuntu 24.04 has no localauthority/50-local.d dir; rules.d always exists)
+          sudo mkdir -p /etc/polkit-1/rules.d
+          sudo tee /etc/polkit-1/rules.d/45-xrdp.rules >/dev/null <<'EOF'
+          polkit.addRule(function(action, subject) {
+              if (action.id.indexOf("org.freedesktop.color-manager.") === 0 &&
+                  subject.isInGroup("sudo")) {
+                  return polkit.Result.YES;
+              }
+          });
+          polkit.addRule(function(action, subject) {
+              if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+                  subject.isInGroup("sudo")) {
+                  return polkit.Result.YES;
+              }
+          });
           EOF
 
           # --- XRDP tuning: low bpp + sane security, single-session reconnect ---
@@ -299,4 +300,5 @@ jobs:
         shell: bash
         run: |
           set +e
-          sudo systemctl stop xrdp tailscaled 2>/dev/null
+          sudo systemctl stop xrdp tailscaled 2>/dev/null || true
+          exit 0
