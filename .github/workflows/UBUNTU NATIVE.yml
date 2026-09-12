@@ -1,5 +1,4 @@
-name: Ubuntu Cloud PC V8.2 - XFCE failsafe fix
-
+name: Ubuntu Cloud PC V8.3 - XFCE Failsafe Fixed
 on:
   workflow_dispatch:
     inputs:
@@ -27,7 +26,6 @@ jobs:
   VM-GITHUB-UBUNTU_NATIVE:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
@@ -41,17 +39,15 @@ jobs:
         uses: actions/checkout@v4
 
       # ==================================================================
-      # PHASE 1 — FAST PATH: get Ubuntu Desktop + XRDP + Tailscale online
-      # as fast as possible. No recommends, no snaps, no extras.
+      # PHASE 1 — FAST PATH
       # ==================================================================
       - name: Fast install Ubuntu Desktop + XRDP
         shell: bash
         run: |
           set -euo pipefail
-
           [[ -n "${RDP_PASSWORD:-}" ]] || { echo "::error::RDP_PASSWORD secret missing"; exit 1; }
 
-          # Speed: no recommends, parallel downloads, keep it lean.
+          # Speed: no recommends, parallel downloads
           sudo tee /etc/apt/apt.conf.d/99-lean >/dev/null <<'EOF'
           APT::Install-Recommends "false";
           APT::Install-Suggests "false";
@@ -60,18 +56,18 @@ jobs:
           Dir::Cache::Archives "/var/cache/apt/archives";
           EOF
 
-          # --- Pick desktop stack by flavor (GitHub runner has NO desktop
-          #     preinstalled; we install the smallest viable set) ---
+          # --- Pick desktop stack ---
           case "${DESKTOP}" in
-            xfce)      DE_PKGS="xfce4 xfce4-goodies xfce4-session xfconf xfdesktop4 xfwm4 xfce4-panel xfdesktop4-data dbus-x11 xfce4-terminal thunar" ;;
+            # Added dbus-user-session and x11-xserver-utils for stability
+            xfce)      DE_PKGS="xfce4 xfce4-goodies xfce4-session xfconf xfdesktop4 xfwm4 xfce4-panel xfdesktop4-data dbus-x11 dbus-user-session x11-xserver-utils xfce4-terminal thunar" ;;
             lxqt)      DE_PKGS="lxqt-core qterminal dbus-x11" ;;
             *)         DE_PKGS="ubuntu-desktop-minimal" ; DESKTOP="gnome-minimal" ;;
           esac
 
-          # --- Skip packages already present on the runner image ---
           WANTED="${DE_PKGS} xrdp xorgxrdp pipewire pipewire-pulse \
-            pipewire-module-xrdp wireplumber \
-            curl ca-certificates wget unzip tar p7zip-full"
+          pipewire-module-xrdp wireplumber \
+          curl ca-certificates wget unzip tar p7zip-full"
+          
           MISSING=""
           for pkg in ${WANTED}; do
             dpkg -s "${pkg}" >/dev/null 2>&1 || MISSING="${MISSING} ${pkg}"
@@ -83,7 +79,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ${MISSING}
           echo "::endgroup::"
 
-          # --- user (idempotent) ---
+          # --- User Setup ---
           id "${RDP_USERNAME}" >/dev/null 2>&1 || sudo useradd -m -s /bin/bash "${RDP_USERNAME}"
           sudo usermod -aG sudo,audio,video,plugdev,netdev "${RDP_USERNAME}"
           echo "${RDP_USERNAME}:${RDP_PASSWORD}" | sudo chpasswd
@@ -100,73 +96,93 @@ jobs:
             "${USER_HOME}/D/Downloads" \
             "${USER_HOME}/.config"
 
-          # --- XRDP session script (flavor-aware) ---
-          case "${DESKTOP}" in
-            xfce) STARTWM='startxfce4' ;;
-            lxqt) STARTWM='startlxqt' ;;
-            *)    STARTWM='gnome-session --session=ubuntu' ;;
-          esac
+          # --- FIX: Pre-seed XFCE config to prevent "Unable to load failsafe session" ---
+          if [[ "${DESKTOP}" == "xfce" ]]; then
+            sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml"
+            sudo tee "${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" >/dev/null <<'XMLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xfce4-session" version="1.0">
+            <property name="sessions" type="empty">
+              <property name="FailsafeSessionName" type="string" value="Failsafe"/>
+            </property>
+          </channel>
+          XMLEOF
+          fi
 
-          sudo tee /etc/xrdp/startwm.sh >/dev/null <<EOF
+          # --- XRDP Session Script (Fixed) ---
+          # Using quoted heredoc 'EOF' to prevent variable expansion issues, 
+          # then sed to inject the desktop flavor.
+          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
           #!/bin/sh
           export LANG=en_US.UTF-8
           export LC_ALL=en_US.UTF-8
           export XDG_SESSION_TYPE=x11
           unset DBUS_SESSION_BUS_ADDRESS
           unset WAYLAND_DISPLAY
-          case "${DESKTOP}" in
-            gnome-minimal)
-              export XDG_CURRENT_DESKTOP=GNOME
-              export XDG_SESSION_DESKTOP=ubuntu
-              export DESKTOP_SESSION=ubuntu
-              export GNOME_SHELL_SESSION_MODE=ubuntu
-              exec dbus-run-session -- gnome-session --session=ubuntu
-              ;;
-            xfce)
-              export XDG_CURRENT_DESKTOP=XFCE
-              export XDG_SESSION_DESKTOP=xfce
-              export DESKTOP_SESSION=xfce
-              export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
-              export XDG_DATA_DIRS=/usr/local/share:/usr/share:/usr/share/xfce4
-              # Classic, XRDP-safe launch (dbus-launch from dbus-x11).
-              # dbus-run-session breaks xfconfd activation on bare XRDP sessions.
-              if command -v dbus-launch >/dev/null 2>&1; then
-                exec dbus-launch --exit-with-session startxfce4
-              else
+          
+          case "__DESKTOP__" in
+          gnome-minimal)
+            export XDG_CURRENT_DESKTOP=GNOME
+            export XDG_SESSION_DESKTOP=ubuntu
+            export DESKTOP_SESSION=ubuntu
+            export GNOME_SHELL_SESSION_MODE=ubuntu
+            exec dbus-run-session -- gnome-session --session=ubuntu
+            ;;
+          xfce)
+            export XDG_CURRENT_DESKTOP=XFCE
+            export XDG_SESSION_DESKTOP=xfce
+            export DESKTOP_SESSION=xfce
+            # FIX: Do NOT override XDG_CONFIG_DIRS. Use system defaults.
+            
+            export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+            mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+            chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+
+            # FIX: Start xfconfd explicitly to avoid D-Bus activation race
+            if command -v dbus-launch >/dev/null 2>&1; then
+              exec dbus-launch --exit-with-session sh -c '
+                for d in /usr/lib/*/xfce4/xfconf; do
+                  [ -x "$d/xfconfd" ] && { "$d/xfconfd" >/dev/null 2>&1 & break; }
+                done
                 exec startxfce4
-              fi
-              ;;
-            lxqt)
-              export XDG_CURRENT_DESKTOP=LXQt
-              export XDG_SESSION_DESKTOP=lxqt
-              export DESKTOP_SESSION=lxqt
-              exec dbus-run-session -- startlxqt
-              ;;
+              '
+            else
+              exec startxfce4
+            fi
+            ;;
+          lxqt)
+            export XDG_CURRENT_DESKTOP=LXQt
+            export XDG_SESSION_DESKTOP=lxqt
+            export DESKTOP_SESSION=lxqt
+            exec dbus-run-session -- startlxqt
+            ;;
           esac
           EOF
+          
           sudo chmod 0755 /etc/xrdp/startwm.sh
+          # Inject the actual desktop flavor into the script
+          sudo sed -i "s/__DESKTOP__/${DESKTOP}/g" /etc/xrdp/startwm.sh
 
           sudo ln -sfn "${USER_HOME}/D" "${USER_HOME}/D_DRIVE"
 
-          # --- polkit JS rules: skip colord/network dialogs on RDP login ---
-          # (Ubuntu 24.04 has no localauthority/50-local.d dir; rules.d always exists)
+          # --- Polkit Rules ---
           sudo mkdir -p /etc/polkit-1/rules.d
           sudo tee /etc/polkit-1/rules.d/45-xrdp.rules >/dev/null <<'EOF'
           polkit.addRule(function(action, subject) {
-              if (action.id.indexOf("org.freedesktop.color-manager.") === 0 &&
-                  subject.isInGroup("sudo")) {
-                  return polkit.Result.YES;
-              }
+            if (action.id.indexOf("org.freedesktop.color-manager.") === 0 &&
+                subject.isInGroup("sudo")) {
+              return polkit.Result.YES;
+            }
           });
           polkit.addRule(function(action, subject) {
-              if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
-                  subject.isInGroup("sudo")) {
-                  return polkit.Result.YES;
-              }
+            if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+                subject.isInGroup("sudo")) {
+              return polkit.Result.YES;
+            }
           });
           EOF
 
-          # --- XRDP tuning: low bpp + sane security, single-session reconnect ---
+          # --- XRDP Tuning ---
           sudo sed -i \
             -e '/^max_bpp=/d' -e '/^xserverbpp=/d' \
             -e '/^security_layer=/d' -e '/^crypt_level=/d' \
@@ -183,11 +199,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "${TAILSCALE_AUTH_KEY:-}" ]] || { echo "::error::TAILSCALE_AUTH_KEY secret missing"; exit 1; }
-
           command -v tailscale >/dev/null 2>&1 || \
             timeout 180s bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+          
           sudo systemctl enable --now tailscaled
-
           for attempt in 1 2 3; do
             echo "Tailscale auth attempt ${attempt}/3..."
             sudo timeout 90s tailscale up \
@@ -203,7 +218,7 @@ jobs:
           echo "${TS_IP}" | sudo tee "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" >/dev/null
 
       # ==================================================================
-      # PHASE 2 — Desktop tuning while RDP is already reachable
+      # PHASE 2 — Desktop tuning
       # ==================================================================
       - name: Tune desktop for XRDP (low CPU)
         shell: bash
@@ -213,26 +228,27 @@ jobs:
           CFG="${USER_HOME}/.config"
           AUTOSTART="${CFG}/autostart"
           sudo -u "${RDP_USERNAME}" mkdir -p "${AUTOSTART}"
-          
-          # --- XFCE: no screen blank/lock (worst RDP papercut), lighter compositor ---
+
           if [[ "${DESKTOP}" == "xfce" ]]; then
-            # Clear stale/corrupt saved sessions (classic failsafe-session cause)
             sudo rm -rf "${USER_HOME}/.cache/sessions" 2>/dev/null || true
-            sudo -u "${RDP_USERNAME}" bash -c "
-              export HOME='${USER_HOME}'
-              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac --create -t int -s 0 2>/dev/null || true
-              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-timeout --create -t int -s 0 2>/dev/null || true
-              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/lock-screen-suspend-hibernate --create -t bool -s false 2>/dev/null || true
-              xfconf-query -c xfwm4 -p /general/sync_to_vblank --create -t bool -s false 2>/dev/null || true
-            "
+            
+            # FIX: Run tuning inside a dbus session so it actually works
+            sudo -u "${RDP_USERNAME}" env HOME="${USER_HOME}" dbus-run-session -- bash -c '
+              xfconf-query -c xfce4-session       -p /sessions/FailsafeSessionName            --create -t string -s Failsafe || true
+              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac         --create -t int  -s 0        || true
+              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-timeout  --create -t int  -s 0        || true
+              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/lock-screen-suspend-hibernate --create -t bool -s false || true
+              xfconf-query -c xfwm4               -p /general/sync_to_vblank                  --create -t bool -s false    || true
+            ' || true
+
             printf '[Desktop Entry]\nHidden=true\nNoDisplay=true\n' | \
               sudo tee "${AUTOSTART}/xscreensaver.desktop" >/dev/null 2>/dev/null || true
+            
             printf '#!/bin/sh\nxset s off\nxset dpms 0 0 0\nxset -dpms\n' | \
               sudo tee "${USER_HOME}/.xprofile" >/dev/null
             sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/.xprofile"
           fi
-          
-          # --- GNOME: no animations/hot corners, kill tracker miners ---
+
           if [[ "${DESKTOP}" == "gnome-minimal" ]]; then
             sudo -u "${RDP_USERNAME}" dbus-run-session -- bash -c '
               gsettings set org.gnome.desktop.interface enable-animations false
@@ -245,7 +261,6 @@ jobs:
                 sudo tee "${AUTOSTART}/${miner}" >/dev/null
             done
           fi
-          
           sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${CFG}"
 
       - name: Diagnose (brief)
@@ -279,7 +294,7 @@ jobs:
           } | tee "${GITHUB_STEP_SUMMARY}"
 
       # ==================================================================
-      # PHASE 3 — Background extras (never blocks first RDP connect)
+      # PHASE 3 — Background extras
       # ==================================================================
       - name: Wine setup (background)
         if: ${{ env.INSTALL_WINE == 'true' }}
@@ -287,29 +302,24 @@ jobs:
         run: |
           set +e
           USER_HOME="/home/${RDP_USERNAME}"
-
           sudo tee /usr/local/bin/wine-setup.sh >/dev/null <<'EOF'
           #!/bin/bash
           set -x
           U="${RDP_USERNAME}"
           H="/home/${U}"
           WINEPREFIX="${H}/D/Wine"
-
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             wine winetricks cabextract || exit 0
-
           sudo install -d -o "${U}" -g "${U}" "$WINEPREFIX"
           sudo -u "${U}" env HOME="${H}" WINEPREFIX="$WINEPREFIX" WINEDEBUG=-all \
             timeout 180s wineboot -u || true
-
           sudo ln -sfn "$WINEPREFIX" "${H}/.wine"
           sudo chown -h "${U}:${U}" "${H}/.wine"
           echo "Wine setup finished."
           EOF
           sudo chmod +x /usr/local/bin/wine-setup.sh
-
           setsid sudo -E /usr/local/bin/wine-setup.sh \
             > "${USER_HOME}/wine-setup.log" 2>&1 < /dev/null &
           disown || true
@@ -320,11 +330,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "${MAX_HOURS}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::max-hours must be a positive integer"; exit 1; }
-
           MAX_SECONDS=$(( MAX_HOURS * 3600 ))
           START=$(date +%s)
           echo "Alive for up to ${MAX_HOURS}h. Touch STOP_WORKFLOW.txt to stop early."
-
           while true; do
             [[ -f STOP_WORKFLOW.txt ]] && { echo "Stop file detected."; break; }
             systemctl is-active --quiet xrdp || sudo systemctl restart xrdp || true
