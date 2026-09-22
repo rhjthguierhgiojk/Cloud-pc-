@@ -1,0 +1,24 @@
+name: Self-Hosted Runner Test
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print connection info
+        run: |
+          echo "=== Runner Info ==="
+          echo "Hostname: $(hostname)"
+          echo "Username: $(whoami)"
+          echo "Local IP address(es):"
+          hostname -I
+          echo ""
+          echo "Public IP address:"
+          curl -s https://api.ipify.org || echo "curl failed (no internet or blocked)"
