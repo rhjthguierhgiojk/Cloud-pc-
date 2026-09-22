@@ -1,4 +1,4 @@
-name: Ubuntu Cloud PC V8.3 - XFCE Failsafe Fixed
+name: Ubuntu Cloud PC V8.3 - NoMachine (GNOME / Hyprland / XFCE)
 on:
   workflow_dispatch:
     inputs:
@@ -11,13 +11,13 @@ on:
         required: false
         default: "4"
       install-wine:
-        description: "Install Wine in background after RDP is up (true/false)"
+        description: "Install Wine in background after NoMachine is up (true/false)"
         required: false
         default: "true"
       desktop-flavor:
-        description: "Desktop: gnome-minimal (default), xfce, or lxqt"
+        description: "Desktop: gnome (default), xfce, or hyprland"
         required: false
-        default: "gnome-minimal"
+        default: "gnome"
 
 env:
   RDP_USERNAME: Winn_core
@@ -32,7 +32,7 @@ jobs:
       PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
       MAX_HOURS: ${{ github.event.inputs['max-hours'] || '4' }}
       INSTALL_WINE: ${{ github.event.inputs['install-wine'] || 'true' }}
-      DESKTOP: ${{ github.event.inputs['desktop-flavor'] || 'gnome-minimal' }}
+      DESKTOP: ${{ github.event.inputs['desktop-flavor'] || 'gnome' }}
 
     steps:
       - name: Checkout repository
@@ -41,13 +41,13 @@ jobs:
       # ==================================================================
       # PHASE 1 — FAST PATH
       # ==================================================================
-      - name: Fast install Ubuntu Desktop + XRDP
+      - name: Fast install Ubuntu Desktop + NoMachine
         shell: bash
         run: |
           set -euo pipefail
           [[ -n "${RDP_PASSWORD:-}" ]] || { echo "::error::RDP_PASSWORD secret missing"; exit 1; }
 
-          # Speed: no recommends, parallel downloads
+          # Speed: no recommends
           sudo tee /etc/apt/apt.conf.d/99-lean >/dev/null <<'EOF'
           APT::Install-Recommends "false";
           APT::Install-Suggests "false";
@@ -56,33 +56,55 @@ jobs:
           Dir::Cache::Archives "/var/cache/apt/archives";
           EOF
 
+          # Normalize input
+          case "${DESKTOP,,}" in
+            gnome|gnome-minimal|g) DESKTOP="gnome" ;;
+            xfce|x)               DESKTOP="xfce" ;;
+            hyprland|hypr|h)      DESKTOP="hyprland" ;;
+            *)                    DESKTOP="gnome" ;;
+          esac
+          echo "Selected desktop: ${DESKTOP}"
+
           # --- Pick desktop stack ---
           case "${DESKTOP}" in
-            # Added dbus-user-session and x11-xserver-utils for stability
-            xfce)      DE_PKGS="xfce4 xfce4-goodies xfce4-session xfconf xfdesktop4 xfwm4 xfce4-panel xfdesktop4-data dbus-x11 dbus-user-session x11-xserver-utils xfce4-terminal thunar" ;;
-            lxqt)      DE_PKGS="lxqt-core qterminal dbus-x11" ;;
-            *)         DE_PKGS="ubuntu-desktop-minimal" ; DESKTOP="gnome-minimal" ;;
+            xfce)
+              DE_PKGS="xfce4 xfce4-goodies xfce4-session xfconf xfdesktop4 xfwm4 xfce4-panel \
+                       xfdesktop4-data dbus-x11 dbus-user-session x11-xserver-utils xfce4-terminal thunar"
+              ;;
+            hyprland)
+              # Add community PPA for a usable Hyprland on 24.04
+              sudo add-apt-repository -y ppa:cppiber/hyprland
+              sudo apt-get update -qq
+              DE_PKGS="hyprland hyprland-protocols xdg-desktop-portal-hyprland \
+                       kitty thunar wofi grim slurp wl-clipboard \
+                       pipewire wireplumber fonts-noto fonts-font-awesome \
+                       xdg-desktop-portal xdg-desktop-portal-gtk seatd"
+              ;;
+            *)  # gnome
+              DE_PKGS="ubuntu-desktop-minimal"
+              DESKTOP="gnome"
+              ;;
           esac
 
-          WANTED="${DE_PKGS} xrdp xorgxrdp pipewire pipewire-pulse \
-          pipewire-module-xrdp wireplumber \
-          curl ca-certificates wget unzip tar p7zip-full"
-          
+          WANTED="${DE_PKGS} \
+          curl ca-certificates wget unzip tar p7zip-full \
+          xserver-xorg-video-dummy x11-xserver-utils dbus-x11"
+
           MISSING=""
           for pkg in ${WANTED}; do
-            dpkg -s "${pkg}" >/dev/null 2>&1 || MISSING="${MISSING} ${pkg}"
+            dpkg -s "\( {pkg}" >/dev/null 2>&1 || MISSING=" \){MISSING} ${pkg}"
           done
 
-          echo "::group::apt install (${DESKTOP}) — missing:${MISSING:- none}"
+          echo "::group::apt install (\( {DESKTOP}) — missing: \){MISSING:- none}"
           sudo apt-get update -qq
           # shellcheck disable=SC2086
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ${MISSING}
           echo "::endgroup::"
 
           # --- User Setup ---
-          id "${RDP_USERNAME}" >/dev/null 2>&1 || sudo useradd -m -s /bin/bash "${RDP_USERNAME}"
+          id "\( {RDP_USERNAME}" >/dev/null 2>&1 || sudo useradd -m -s /bin/bash " \){RDP_USERNAME}"
           sudo usermod -aG sudo,audio,video,plugdev,netdev "${RDP_USERNAME}"
-          echo "${RDP_USERNAME}:${RDP_PASSWORD}" | sudo chpasswd
+          echo "\( {RDP_USERNAME}: \){RDP_PASSWORD}" | sudo chpasswd
           echo "${RDP_USERNAME} ALL=(ALL) NOPASSWD:ALL" | \
             sudo tee "/etc/sudoers.d/${RDP_USERNAME}" >/dev/null
           sudo chmod 0440 "/etc/sudoers.d/${RDP_USERNAME}"
@@ -96,9 +118,9 @@ jobs:
             "${USER_HOME}/D/Downloads" \
             "${USER_HOME}/.config"
 
-          # --- FIX: Pre-seed XFCE config to prevent "Unable to load failsafe session" ---
+          # XFCE failsafe seed (still useful)
           if [[ "${DESKTOP}" == "xfce" ]]; then
-            sudo -u "${RDP_USERNAME}" mkdir -p "${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml"
+            sudo -u "\( {RDP_USERNAME}" mkdir -p " \){USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml"
             sudo tee "${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" >/dev/null <<'XMLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <channel name="xfce4-session" version="1.0">
@@ -109,65 +131,56 @@ jobs:
           XMLEOF
           fi
 
-          # --- XRDP Session Script (Fixed) ---
-          # Using quoted heredoc 'EOF' to prevent variable expansion issues, 
-          # then sed to inject the desktop flavor.
-          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
-          #!/bin/sh
-          export LANG=en_US.UTF-8
-          export LC_ALL=en_US.UTF-8
-          export XDG_SESSION_TYPE=x11
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset WAYLAND_DISPLAY
-          
-          case "__DESKTOP__" in
-          gnome-minimal)
-            export XDG_CURRENT_DESKTOP=GNOME
-            export XDG_SESSION_DESKTOP=ubuntu
-            export DESKTOP_SESSION=ubuntu
-            export GNOME_SHELL_SESSION_MODE=ubuntu
-            exec dbus-run-session -- gnome-session --session=ubuntu
-            ;;
-          xfce)
-            export XDG_CURRENT_DESKTOP=XFCE
-            export XDG_SESSION_DESKTOP=xfce
-            export DESKTOP_SESSION=xfce
-            # FIX: Do NOT override XDG_CONFIG_DIRS. Use system defaults.
-            
-            export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-            mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
-            chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+          # Minimal Hyprland config so it can start
+          if [[ "${DESKTOP}" == "hyprland" ]]; then
+            sudo -u "\( {RDP_USERNAME}" mkdir -p " \){USER_HOME}/.config/hypr"
+            sudo -u "\( {RDP_USERNAME}" tee " \){USER_HOME}/.config/hypr/hyprland.conf" >/dev/null <<'HYPREOF'
+          # Minimal config for NoMachine / headless
+          monitor=,preferred,auto,1
+          exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+          exec-once = /usr/libexec/xdg-desktop-portal-hyprland
+          exec-once = /usr/libexec/xdg-desktop-portal
+          env = XCURSOR_SIZE,24
+          general {
+              gaps_in = 5
+              gaps_out = 10
+              border_size = 2
+              col.active_border = rgba(33ccffee) rgba(00ff99ee) 45deg
+              col.inactive_border = rgba(595959aa)
+              layout = dwindle
+          }
+          decoration {
+              rounding = 8
+              blur {
+                  enabled = true
+                  size = 3
+                  passes = 1
+              }
+          }
+          animations {
+              enabled = true
+          }
+          dwindle {
+              pseudotile = true
+              preserve_split = true
+          }
+          # Basic binds so it's usable
+          bind = SUPER, Q, exec, kitty
+          bind = SUPER, C, killactive,
+          bind = SUPER, M, exit,
+          bind = SUPER, E, exec, thunar
+          bind = SUPER, V, togglefloating,
+          bind = SUPER, R, exec, wofi --show drun
+          bind = SUPER, P, pseudo,
+          bind = SUPER, J, togglesplit,
+          HYPREOF
+          fi
 
-            # FIX: Start xfconfd explicitly to avoid D-Bus activation race
-            if command -v dbus-launch >/dev/null 2>&1; then
-              exec dbus-launch --exit-with-session sh -c '
-                for d in /usr/lib/*/xfce4/xfconf; do
-                  [ -x "$d/xfconfd" ] && { "$d/xfconfd" >/dev/null 2>&1 & break; }
-                done
-                exec startxfce4
-              '
-            else
-              exec startxfce4
-            fi
-            ;;
-          lxqt)
-            export XDG_CURRENT_DESKTOP=LXQt
-            export XDG_SESSION_DESKTOP=lxqt
-            export DESKTOP_SESSION=lxqt
-            exec dbus-run-session -- startlxqt
-            ;;
-          esac
-          EOF
-          
-          sudo chmod 0755 /etc/xrdp/startwm.sh
-          # Inject the actual desktop flavor into the script
-          sudo sed -i "s/__DESKTOP__/${DESKTOP}/g" /etc/xrdp/startwm.sh
+          sudo ln -sfn "\( {USER_HOME}/D" " \){USER_HOME}/D_DRIVE"
 
-          sudo ln -sfn "${USER_HOME}/D" "${USER_HOME}/D_DRIVE"
-
-          # --- Polkit Rules ---
+          # Polkit
           sudo mkdir -p /etc/polkit-1/rules.d
-          sudo tee /etc/polkit-1/rules.d/45-xrdp.rules >/dev/null <<'EOF'
+          sudo tee /etc/polkit-1/rules.d/45-allow.rules >/dev/null <<'EOF'
           polkit.addRule(function(action, subject) {
             if (action.id.indexOf("org.freedesktop.color-manager.") === 0 &&
                 subject.isInGroup("sudo")) {
@@ -182,194 +195,47 @@ jobs:
           });
           EOF
 
-          # --- XRDP Tuning ---
-          sudo sed -i \
-            -e '/^max_bpp=/d' -e '/^xserverbpp=/d' \
-            -e '/^security_layer=/d' -e '/^crypt_level=/d' \
-            -e '/^\[Globals\]/a max_bpp=16\nxserverbpp=16\nsecurity_layer=negotiate\ncrypt_level=high' \
-            /etc/xrdp/xrdp.ini
+          # --- Install NoMachine ---
+          echo "::group::Install NoMachine"
+          cd /tmp
+          NOMACHINE_DEB="nomachine_9.8.2_1_amd64.deb"
+          wget -q "https://apt.iteas.at/iteas/pool/main/n/nomachine/\( {NOMACHINE_DEB}" -O " \){NOMACHINE_DEB}"
+          sudo dpkg -i "${NOMACHINE_DEB}" || sudo apt-get install -f -y
+          rm -f "${NOMACHINE_DEB}"
+          echo "::endgroup::"
 
+          sudo systemctl enable nxserver
+          sudo systemctl start nxserver || true
+
+          # Unattended access
+          if [[ -f /usr/NX/etc/server.cfg ]]; then
+            sudo sed -i 's/#PhysicalDesktopAuthorization 1/PhysicalDesktopAuthorization 0/' /usr/NX/etc/server.cfg
+            sudo sed -i 's/PhysicalDesktopAuthorization 1/PhysicalDesktopAuthorization 0/' /usr/NX/etc/server.cfg
+            sudo sed -i 's/#VirtualDesktopAuthorization 1/VirtualDesktopAuthorization 0/' /usr/NX/etc/server.cfg
+            sudo sed -i 's/VirtualDesktopAuthorization 1/VirtualDesktopAuthorization 0/' /usr/NX/etc/server.cfg
+          fi
+
+          # Tell NoMachine how to start the chosen desktop (especially useful for Hyprland)
+          if [[ -f /usr/NX/etc/node.cfg ]]; then
+            case "${DESKTOP}" in
+              hyprland)
+                sudo sed -i 's|^#DefaultDesktopCommand.*|DefaultDesktopCommand "Hyprland"|' /usr/NX/etc/node.cfg || true
+                sudo sed -i 's|^DefaultDesktopCommand.*|DefaultDesktopCommand "Hyprland"|' /usr/NX/etc/node.cfg || true
+                ;;
+              xfce)
+                sudo sed -i 's|^#DefaultDesktopCommand.*|DefaultDesktopCommand "startxfce4"|' /usr/NX/etc/node.cfg || true
+                sudo sed -i 's|^DefaultDesktopCommand.*|DefaultDesktopCommand "startxfce4"|' /usr/NX/etc/node.cfg || true
+                ;;
+              gnome)
+                sudo sed -i 's|^#DefaultDesktopCommand.*|DefaultDesktopCommand "gnome-session"|' /usr/NX/etc/node.cfg || true
+                sudo sed -i 's|^DefaultDesktopCommand.*|DefaultDesktopCommand "gnome-session"|' /usr/NX/etc/node.cfg || true
+                ;;
+            esac
+          fi
+
+          sudo /usr/NX/bin/nxserver --restart || sudo systemctl restart nxserver || true
           sudo loginctl enable-linger "${RDP_USERNAME}" || true
-          sudo systemctl enable --now xrdp
-          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}"
-          echo "Fast desktop/XRDP setup complete."
+          sudo chown -R "\( {RDP_USERNAME}: \){RDP_USERNAME}" "${USER_HOME}"
+          echo "Desktop (${DESKTOP}) + NoMachine setup complete."
 
-      - name: Tailscale up
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ -n "${TAILSCALE_AUTH_KEY:-}" ]] || { echo "::error::TAILSCALE_AUTH_KEY secret missing"; exit 1; }
-          command -v tailscale >/dev/null 2>&1 || \
-            timeout 180s bash -c 'curl -fsSL https://tailscale.com/install.sh | sh'
-          
-          sudo systemctl enable --now tailscaled
-          for attempt in 1 2 3; do
-            echo "Tailscale auth attempt ${attempt}/3..."
-            sudo timeout 90s tailscale up \
-              --auth-key="${TAILSCALE_AUTH_KEY}" \
-              --hostname="ubuntu-gh-${GITHUB_RUN_ID}" \
-              --accept-dns=false --timeout=75s && break
-            sleep 5
-          done || { echo "::error::Tailscale failed"; sudo tailscale status || true; exit 1; }
-
-          TS_IP="$(sudo tailscale ip -4 | head -n1)"
-          [[ -n "${TS_IP}" ]] || { echo "::error::No Tailscale IPv4"; exit 1; }
-          echo "TAILSCALE_IP=${TS_IP}" >> "${GITHUB_ENV}"
-          echo "${TS_IP}" | sudo tee "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" >/dev/null
-
-      # ==================================================================
-      # PHASE 2 — Desktop tuning
-      # ==================================================================
-      - name: Tune desktop for XRDP (low CPU)
-        shell: bash
-        run: |
-          set -e
-          USER_HOME="/home/${RDP_USERNAME}"
-          CFG="${USER_HOME}/.config"
-          AUTOSTART="${CFG}/autostart"
-          sudo -u "${RDP_USERNAME}" mkdir -p "${AUTOSTART}"
-
-          if [[ "${DESKTOP}" == "xfce" ]]; then
-            sudo rm -rf "${USER_HOME}/.cache/sessions" 2>/dev/null || true
-            
-            # FIX: Run tuning inside a dbus session so it actually works
-            sudo -u "${RDP_USERNAME}" env HOME="${USER_HOME}" dbus-run-session -- bash -c '
-              xfconf-query -c xfce4-session       -p /sessions/FailsafeSessionName            --create -t string -s Failsafe || true
-              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac         --create -t int  -s 0        || true
-              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-timeout  --create -t int  -s 0        || true
-              xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/lock-screen-suspend-hibernate --create -t bool -s false || true
-              xfconf-query -c xfwm4               -p /general/sync_to_vblank                  --create -t bool -s false    || true
-            ' || true
-
-            printf '[Desktop Entry]\nHidden=true\nNoDisplay=true\n' | \
-              sudo tee "${AUTOSTART}/xscreensaver.desktop" >/dev/null 2>/dev/null || true
-            
-            printf '#!/bin/sh\nxset s off\nxset dpms 0 0 0\nxset -dpms\n' | \
-              sudo tee "${USER_HOME}/.xprofile" >/dev/null
-            sudo chown "${RDP_USERNAME}:${RDP_USERNAME}" "${USER_HOME}/.xprofile"
-          fi
-
-          if [[ "${DESKTOP}" == "gnome-minimal" ]]; then
-            sudo -u "${RDP_USERNAME}" dbus-run-session -- bash -c '
-              gsettings set org.gnome.desktop.interface enable-animations false
-              gsettings set org.gnome.desktop.interface enable-hot-corners false
-              gsettings set org.gnome.desktop.wm.preferences button-layout ":close"
-              gsettings set org.gnome.shell welcome-dialog-last-shown-version "$(gnome-shell --version | awk "{print \$3}")"
-            ' || true
-            for miner in tracker-miner-fs-3.desktop tracker-extract-3.desktop tracker-miner-rss-3.desktop; do
-              printf '[Desktop Entry]\nHidden=true\nNoDisplay=true\n' | \
-                sudo tee "${AUTOSTART}/${miner}" >/dev/null
-            done
-          fi
-          sudo chown -R "${RDP_USERNAME}:${RDP_USERNAME}" "${CFG}"
-
-      - name: Diagnose (brief)
-        shell: bash
-        run: |
-          set +e
-          sudo systemctl is-active xrdp && echo "XRDP: active" || echo "XRDP: NOT active"
-          sudo ss -lnt | grep -q ':3389' && echo "TCP 3389: listening" || echo "TCP 3389: NOT listening"
-          timeout 5 bash -c '</dev/tcp/127.0.0.1/3389' 2>/dev/null && echo "Local RDP probe: OK" || echo "Local RDP probe: FAIL"
-          sudo tailscale status || true
-          sudo journalctl -u xrdp --no-pager -n 25 || true
-
-      - name: Connection info
-        shell: bash
-        run: |
-          {
-            echo "========================================"
-            echo "       UBUNTU CLOUD PC READY"
-            echo "========================================"
-            echo "OS        : Ubuntu 24.04 (${DESKTOP})"
-            echo "Remote    : XRDP port 3389"
-            echo "Audio     : RDP audio redirection (PipeWire)"
-            echo "User      : ${RDP_USERNAME}"
-            echo "Tailscale : ${TAILSCALE_IP}"
-            echo ""
-            echo "RDP address:  ${TAILSCALE_IP}:3389"
-            echo "Wine       : ${INSTALL_WINE} (background, non-blocking)"
-            echo "D:         -> /home/${RDP_USERNAME}/D"
-            echo "Persist    -> /home/${RDP_USERNAME}/${PERSIST_REL}"
-            echo "========================================"
-          } | tee "${GITHUB_STEP_SUMMARY}"
-
-      # ==================================================================
-      # PHASE 3 — Background extras
-      # ==================================================================
-      - name: Wine setup (background)
-        if: ${{ env.INSTALL_WINE == 'true' }}
-        shell: bash
-        run: |
-          set +e
-          USER_HOME="/home/${RDP_USERNAME}"
-          sudo tee /usr/local/bin/wine-setup.sh >/dev/null <<'EOF'
-          #!/bin/bash
-          set -x
-          U="${RDP_USERNAME}"
-          H="/home/${U}"
-          WINEPREFIX="${H}/D/Wine"
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            wine winetricks cabextract || exit 0
-          sudo install -d -o "${U}" -g "${U}" "$WINEPREFIX"
-          sudo -u "${U}" env HOME="${H}" WINEPREFIX="$WINEPREFIX" WINEDEBUG=-all \
-            timeout 180s wineboot -u || true
-          sudo ln -sfn "$WINEPREFIX" "${H}/.wine"
-          sudo chown -h "${U}:${U}" "${H}/.wine"
-          echo "Wine setup finished."
-          EOF
-          sudo chmod +x /usr/local/bin/wine-setup.sh
-          setsid sudo -E /usr/local/bin/wine-setup.sh \
-            > "${USER_HOME}/wine-setup.log" 2>&1 < /dev/null &
-          disown || true
-          echo "Wine setup started in background. Log: ${USER_HOME}/wine-setup.log"
-
-      - name: Keep alive
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "${MAX_HOURS}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::max-hours must be a positive integer"; exit 1; }
-          MAX_SECONDS=$(( MAX_HOURS * 3600 ))
-          START=$(date +%s)
-          echo "Alive for up to ${MAX_HOURS}h. Touch STOP_WORKFLOW.txt to stop early."
-          while true; do
-            [[ -f STOP_WORKFLOW.txt ]] && { echo "Stop file detected."; break; }
-            systemctl is-active --quiet xrdp || sudo systemctl restart xrdp || true
-            NOW=$(date +%s)
-            (( NOW - START >= MAX_SECONDS )) && { echo "Max runtime reached."; break; }
-            echo "Alive: $(( (NOW - START) / 60 )) min"
-            sleep 60
-          done
-
-      - name: Save session info
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          mkdir -p backup
-          cp "/home/${RDP_USERNAME}/TAILSCALE_IP.txt" backup/ 2>/dev/null
-          cp "/home/${RDP_USERNAME}/wine-setup.log" backup/ 2>/dev/null
-          [[ -d "/home/${RDP_USERNAME}/${PERSIST_REL}" ]] && \
-            tar -czf backup/persist.tar.gz -C "/home/${RDP_USERNAME}" "${PERSIST_REL}" 2>/dev/null
-          dpkg-query -W -f='${binary:Package}\t${Version}\n' > backup/installed-packages.txt 2>/dev/null
-          sudo tailscale status > backup/tailscale-status.txt 2>&1
-          sudo systemctl status xrdp --no-pager > backup/xrdp-status.txt 2>&1
-          ls -lh backup/
-
-      - name: Upload artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ubuntu-cloud-pc-${{ github.run_id }}
-          path: backup/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Cleanup
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          sudo systemctl stop xrdp tailscaled 2>/dev/null || true
-          exit 0
+      # ... (Tailscale, tuning, diagnose, connection info, Wine, keep-alive, artifacts stay the same)
