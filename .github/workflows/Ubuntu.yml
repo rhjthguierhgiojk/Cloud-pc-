@@ -1,24 +1,30 @@
-name: Self-Hosted Runner Test
+name: Test Self-Hosted Runner
 
 on:
+  workflow_dispatch:          # รันมือได้จาก GitHub
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches: [ main ]        # หรือ branch ที่คุณใช้ก็ได้
 
 jobs:
   test:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: self-hosted      # สำคัญมาก ต้องเป็น self-hosted
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Print connection info
+      - name: Print system info
         run: |
-          echo "=== Runner Info ==="
+          echo "===== Runner is alive! ====="
           echo "Hostname: $(hostname)"
-          echo "Username: $(whoami)"
-          echo "Local IP address(es):"
-          hostname -I
-          echo ""
-          echo "Public IP address:"
-          curl -s https://api.ipify.org || echo "curl failed (no internet or blocked)"
+          echo "User: $(whoami)"
+          echo "Date: $(date)"
+          echo "OS Info:"
+          uname -a
+          echo "Disk space:"
+          df -h
+          echo "===== Test completed successfully ====="
+
+      - name: Simple success check
+        run: |
+          echo "If you see this message, the self-hosted runner is working correctly 💚"
+          exit 0
