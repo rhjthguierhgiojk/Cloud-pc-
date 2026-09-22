@@ -1,53 +1,10 @@
-name: Ubuntu Cloud PC V8.3 - NoMachine (GNOME / Hyprland / XFCE)
-on:
-  workflow_dispatch:
-    inputs:
-      persist-path:
-        description: "Folder in /home/Winn_core to preserve"
-        required: false
-        default: Persist
-      max-hours:
-        description: "Maximum hours to keep the Ubuntu desktop alive"
-        required: false
-        default: "4"
-      install-wine:
-        description: "Install Wine in background after NoMachine is up (true/false)"
-        required: false
-        default: "true"
-      desktop-flavor:
-        description: "Desktop: gnome (default), xfce, or hyprland"
-        required: false
-        default: "gnome"
-
-env:
-  RDP_USERNAME: Winn_core
-
-jobs:
-  VM-GITHUB-UBUNTU_NATIVE:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    env:
-      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-      PERSIST_REL: ${{ github.event.inputs['persist-path'] || 'Persist' }}
-      MAX_HOURS: ${{ github.event.inputs['max-hours'] || '4' }}
-      INSTALL_WINE: ${{ github.event.inputs['install-wine'] || 'true' }}
-      DESKTOP: ${{ github.event.inputs['desktop-flavor'] || 'gnome' }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ==================================================================
-      # PHASE 1 — FAST PATH
-      # ==================================================================
-      - name: Fast install Ubuntu Desktop + NoMachine
+- name: Fast install Ubuntu Desktop + NoMachine
         shell: bash
         run: |
           set -euo pipefail
           [[ -n "${RDP_PASSWORD:-}" ]] || { echo "::error::RDP_PASSWORD secret missing"; exit 1; }
 
-          # Speed: no recommends
+          # Speed settings
           sudo tee /etc/apt/apt.conf.d/99-lean >/dev/null <<'EOF'
           APT::Install-Recommends "false";
           APT::Install-Suggests "false";
@@ -56,7 +13,7 @@ jobs:
           Dir::Cache::Archives "/var/cache/apt/archives";
           EOF
 
-          # Normalize input
+          # Normalize desktop choice
           case "${DESKTOP,,}" in
             gnome|gnome-minimal|g) DESKTOP="gnome" ;;
             xfce|x)               DESKTOP="xfce" ;;
@@ -65,48 +22,48 @@ jobs:
           esac
           echo "Selected desktop: ${DESKTOP}"
 
-          # --- Pick desktop stack ---
+          # Choose packages
           case "${DESKTOP}" in
             xfce)
-              DE_PKGS="xfce4 xfce4-goodies xfce4-session xfconf xfdesktop4 xfwm4 xfce4-panel \
-                       xfdesktop4-data dbus-x11 dbus-user-session x11-xserver-utils xfce4-terminal thunar"
+              DE_PKGS="xfce4 xfce4-goodies xfce4-session xfconf xfdesktop4 xfwm4 xfce4-panel xfdesktop4-data dbus-x11 dbus-user-session x11-xserver-utils xfce4-terminal thunar"
               ;;
             hyprland)
-              # Add community PPA for a usable Hyprland on 24.04
               sudo add-apt-repository -y ppa:cppiber/hyprland
               sudo apt-get update -qq
-              DE_PKGS="hyprland hyprland-protocols xdg-desktop-portal-hyprland \
-                       kitty thunar wofi grim slurp wl-clipboard \
-                       pipewire wireplumber fonts-noto fonts-font-awesome \
-                       xdg-desktop-portal xdg-desktop-portal-gtk seatd"
+              DE_PKGS="hyprland hyprland-protocols xdg-desktop-portal-hyprland kitty thunar wofi grim slurp wl-clipboard pipewire wireplumber fonts-noto fonts-font-awesome xdg-desktop-portal xdg-desktop-portal-gtk seatd"
               ;;
-            *)  # gnome
+            *)
               DE_PKGS="ubuntu-desktop-minimal"
               DESKTOP="gnome"
               ;;
           esac
 
-          WANTED="${DE_PKGS} \
-          curl ca-certificates wget unzip tar p7zip-full \
-          xserver-xorg-video-dummy x11-xserver-utils dbus-x11"
+          WANTED="${DE_PKGS} curl ca-certificates wget unzip tar p7zip-full xserver-xorg-video-dummy x11-xserver-utils dbus-x11"
 
           MISSING=""
           for pkg in ${WANTED}; do
-            dpkg -s "\( {pkg}" >/dev/null 2>&1 || MISSING=" \){MISSING} ${pkg}"
+            if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+              MISSING="${MISSING} ${pkg}"
+            fi
           done
 
-          echo "::group::apt install (\( {DESKTOP}) — missing: \){MISSING:- none}"
+          echo "::group::apt install (${DESKTOP})"
+          echo "Packages to install:${MISSING:- (none)}"
           sudo apt-get update -qq
-          # shellcheck disable=SC2086
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ${MISSING}
+
+          if [[ -n "${MISSING}" ]]; then
+            # shellcheck disable=SC2086
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ${MISSING}
+          else
+            echo "All packages already present"
+          fi
           echo "::endgroup::"
 
           # --- User Setup ---
           id "\( {RDP_USERNAME}" >/dev/null 2>&1 || sudo useradd -m -s /bin/bash " \){RDP_USERNAME}"
           sudo usermod -aG sudo,audio,video,plugdev,netdev "${RDP_USERNAME}"
           echo "\( {RDP_USERNAME}: \){RDP_PASSWORD}" | sudo chpasswd
-          echo "${RDP_USERNAME} ALL=(ALL) NOPASSWD:ALL" | \
-            sudo tee "/etc/sudoers.d/${RDP_USERNAME}" >/dev/null
+          echo "\( {RDP_USERNAME} ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/ \){RDP_USERNAME}" >/dev/null
           sudo chmod 0440 "/etc/sudoers.d/${RDP_USERNAME}"
 
           USER_HOME="/home/${RDP_USERNAME}"
@@ -118,7 +75,7 @@ jobs:
             "${USER_HOME}/D/Downloads" \
             "${USER_HOME}/.config"
 
-          # XFCE failsafe seed (still useful)
+          # XFCE failsafe seed
           if [[ "${DESKTOP}" == "xfce" ]]; then
             sudo -u "\( {RDP_USERNAME}" mkdir -p " \){USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml"
             sudo tee "${USER_HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" >/dev/null <<'XMLEOF'
@@ -131,15 +88,14 @@ jobs:
           XMLEOF
           fi
 
-          # Minimal Hyprland config so it can start
+          # Minimal Hyprland config
           if [[ "${DESKTOP}" == "hyprland" ]]; then
             sudo -u "\( {RDP_USERNAME}" mkdir -p " \){USER_HOME}/.config/hypr"
             sudo -u "\( {RDP_USERNAME}" tee " \){USER_HOME}/.config/hypr/hyprland.conf" >/dev/null <<'HYPREOF'
-          # Minimal config for NoMachine / headless
           monitor=,preferred,auto,1
           exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
-          exec-once = /usr/libexec/xdg-desktop-portal-hyprland
-          exec-once = /usr/libexec/xdg-desktop-portal
+          exec-once = /usr/libexec/xdg-desktop-portal-hyprland || true
+          exec-once = /usr/libexec/xdg-desktop-portal || true
           env = XCURSOR_SIZE,24
           general {
               gaps_in = 5
@@ -164,7 +120,6 @@ jobs:
               pseudotile = true
               preserve_split = true
           }
-          # Basic binds so it's usable
           bind = SUPER, Q, exec, kitty
           bind = SUPER, C, killactive,
           bind = SUPER, M, exit,
@@ -215,7 +170,7 @@ jobs:
             sudo sed -i 's/VirtualDesktopAuthorization 1/VirtualDesktopAuthorization 0/' /usr/NX/etc/server.cfg
           fi
 
-          # Tell NoMachine how to start the chosen desktop (especially useful for Hyprland)
+          # Tell NoMachine which desktop to start
           if [[ -f /usr/NX/etc/node.cfg ]]; then
             case "${DESKTOP}" in
               hyprland)
@@ -237,5 +192,3 @@ jobs:
           sudo loginctl enable-linger "${RDP_USERNAME}" || true
           sudo chown -R "\( {RDP_USERNAME}: \){RDP_USERNAME}" "${USER_HOME}"
           echo "Desktop (${DESKTOP}) + NoMachine setup complete."
-
-      # ... (Tailscale, tuning, diagnose, connection info, Wine, keep-alive, artifacts stay the same)
