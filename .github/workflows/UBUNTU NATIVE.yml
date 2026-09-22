@@ -1,4 +1,4 @@
-- name: Fast install Ubuntu Desktop + NoMachine
+       - name: Fast install Ubuntu Desktop + NoMachine
         shell: bash
         run: |
           set -euo pipefail
